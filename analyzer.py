@@ -237,98 +237,59 @@ API-Football no tiene datos de estos equipos. Usa web_search ANTES de responder:
 5. "{away} corners tarjetas por partido estadísticas"
 """
 
-    return f"""Eres un analista deportivo experto en fútbol. Tu trabajo es generar un informe claro, visual y fácil de entender para alguien que quiere apostar o analizar el partido *{home}* (local) vs *{away}* (visitante).
+    cond_short = "\n".join(
+        f'• {c["label"]} (peso {c["weight"]})'
+        for c in conditions
+    )
+
+    return f"""Analista deportivo experto. Informe claro y visual para Telegram del partido *{home}* vs *{away}*.
 
 {web_instruction}
-
-DATOS DISPONIBLES:
+DATOS:
 {data_str}
 
-Para cualquier dato marcado como "s/d", búscalo con web_search en Sofascore antes de escribir el análisis.
+Si hay datos "s/d", búscalos en Sofascore con web_search.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-INSTRUCCIONES DE FORMATO — sigue esto AL PIE DE LA LETRA:
-
-1. Escribe siempre en español claro y directo. Sin tecnicismos innecesarios.
-2. Cuando pongas estadísticas, explica qué significa. Por ejemplo:
-   - NO escribas: "Corners: s/d | Disparos: s/d | -1.5 goles 1T"
-   - SÍ escribe: "⚽ Marca de media 1.8 goles por partido en casa" o "📐 No hay datos de córners disponibles"
-3. Los resultados recientes ponlos como: ✅ Ganó 2-1 vs Rival · ❌ Perdió 0-1 vs Rival · 🟡 Empató 1-1 vs Rival
-4. Las condiciones explícalas en lenguaje natural: no pongas IDs técnicos como [btts] o [over25]
-5. La puntuación final exprésala con una barra de progreso visual y una frase clara
-
-ESTRUCTURA EXACTA A SEGUIR:
+FORMATO (español, sin tecnicismos, máx 3500 caracteres):
 
 ⚽ *{home.upper()} vs {away.upper()}*
-_[Competición y contexto del partido]_
+_[competición]_
 
 ━━━━━━━━━━━━━━━━
-🔵 *{home} jugando EN CASA*
-Últimos partidos en casa:
-✅/❌/🟡 [resultado] vs [rival] · ✅/❌/🟡 [resultado] vs [rival] · ...
+🔵 *{home} en casa*
+[últimos 5: ✅Ganó X-X vs Rival · ❌Perdió · 🟡Empató]
+• Gana el X% en casa | Marca X goles, encaja X de media
+• Córners: X/partido | Disparos: X/partido | Tarjetas: X/partido
 
-📊 Rendimiento en casa:
-• Gana el [X]% de sus partidos en casa
-• Marca de media [X] goles y encaja [X] por partido
-• Córners por partido: [X] (o "sin datos disponibles")
-• Disparos a puerta: [X] por partido (o "sin datos disponibles")  
-• Tarjetas: [X] por partido (o "sin datos disponibles")
-
-🔵 *{home} jugando FUERA*
-• Forma fuera: [X] victorias, [X] empates, [X] derrotas en últimos 5
-• Goles fuera: marca [X] y encaja [X] de media
+🔵 *{home} fuera*
+• X victorias, X empates, X derrotas en últimos 5 fuera
+• Marca X y encaja X de media fuera
 
 ━━━━━━━━━━━━━━━━
-🔴 *{away} jugando FUERA DE CASA*
-Últimos partidos fuera:
-✅/❌/🟡 [resultado] vs [rival] · ...
+🔴 *{away} fuera*
+[últimos 5 fuera: ✅/❌/🟡]
+• Gana el X% fuera | Marca X, encaja X de media fuera
+• Córners: X/partido | Disparos: X/partido | Tarjetas: X/partido
 
-📊 Rendimiento fuera:
-• Gana el [X]% de sus partidos fuera
-• Marca de media [X] goles y encaja [X] por partido
-• Córners por partido: [X] (o "sin datos disponibles")
-• Disparos a puerta: [X] por partido (o "sin datos disponibles")
-• Tarjetas: [X] por partido (o "sin datos disponibles")
-
-🔴 *{away} jugando EN CASA*
-• Forma en casa: [X] victorias, [X] empates, [X] derrotas en últimos 5
-• Goles en casa: marca [X] y encaja [X] de media
+🔴 *{away} en casa*
+• X victorias, X empates, X derrotas en últimos 5 en casa
 
 ━━━━━━━━━━━━━━━━
-⚔️ *Historial de enfrentamientos directos*
-[fecha] [equipo] [X]-[X] [equipo] — ganó/empató/perdió [equipo local]
-[fecha] ...
-📌 En los últimos [X] enfrentamientos: [equipo] ganó [X] veces, [X] empates, [equipo] ganó [X] veces
-📌 Media de goles por partido entre ellos: [X]
+⚔️ *Historial directo*
+[fecha] Equipo X-X Equipo
+📌 [equipo] domina con X victorias. Media X goles/partido.
 
 ━━━━━━━━━━━━━━━━
-✅ *Análisis de condiciones*
-Evalúa cada condición con una explicación humana y clara:
-
-✅ o ❌ o ⚠️ *[Nombre legible de la condición]*
-_[Explicación en 1 frase: qué datos lo confirman o lo desmienten. Si no hay datos, dilo claramente]_
-
-Condiciones a evaluar (usa nombres legibles, NO los IDs técnicos):
-{conditions_block}
+✅ *Condiciones* (✅ se cumple · ❌ no · ⚠️ sin datos)
+{cond_short}
+[Para cada una: ✅/❌/⚠️ Nombre — una frase explicando por qué]
 
 ━━━━━━━━━━━━━━━━
-📊 *Puntuación del análisis*
-Puntos conseguidos: [X] de {max_pts} posibles
-Porcentaje: [███████░░░] [X]%
-Veredicto: 🟢 MUY FAVORABLE / 🟡 DUDOSO / 🔴 NO RECOMENDABLE
+📊 *Puntuación: X/{max_pts} pts ([X]%)*
+[████████░░] 🟢 FAVORABLE / 🟡 DUDOSO / 🔴 NO RECOMENDABLE
 
-━━━━━━━━━━━━━━━━
-🔮 *Conclusión*
-[2-3 frases máximo explicando qué mercados tienen más sentido según los datos: goles, córners, tarjetas, resultado]
-
-📡 _{"Datos: API-Football + Sofascore" if data["api_ok"] else "Datos: Sofascore/Flashscore"} · {now}_
-━━━━━━━━━━━━━━━━
-
-REGLAS FINALES:
-- Máximo 4000 caracteres
-- NUNCA escribas códigos técnicos como [btts], [over25], s/d sin explicar
-- Si no tienes un dato, escribe "sin datos disponibles" en texto normal
-- El análisis debe entenderlo alguien que no sabe de estadísticas
+🔮 *Conclusión:* [2 frases: qué mercados avalan los datos]
+📡 _{"API-Football" if data["api_ok"] else "Sofascore"} · {now}_
 """
 
 
