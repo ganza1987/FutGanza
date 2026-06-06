@@ -97,7 +97,7 @@ async def analyze_match(
 
     # Use web_search tool so Claude can fetch real data
     body = {
-        "model": "claude-haiku-4-5-20251001",
+        "model": "claude-sonnet-4-6",
         "max_tokens": 4000,
         "tools": [
             {
