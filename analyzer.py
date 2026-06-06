@@ -43,13 +43,11 @@ async def apif(endpoint: str, params: dict) -> dict:
 
 
 async def find_team(name: str) -> dict | None:
-    """Search team by name, return best match."""
     try:
         data = await apif("teams", {"search": name})
         results = data.get("response", [])
         if not results:
             return None
-        # Prefer exact or close match
         name_lower = name.lower()
         for r in results:
             if name_lower in r["team"]["name"].lower():
@@ -61,7 +59,6 @@ async def find_team(name: str) -> dict | None:
 
 
 async def get_fixtures(team_id: int, last: int = 10) -> list:
-    """Get last N fixtures for a team across all seasons."""
     try:
         data = await apif("fixtures", {"team": team_id, "last": last})
         return data.get("response", [])
@@ -71,7 +68,6 @@ async def get_fixtures(team_id: int, last: int = 10) -> list:
 
 
 async def get_fixture_stats(fixture_id: int) -> list:
-    """Get detailed stats for a fixture (corners, shots, cards)."""
     try:
         data = await apif("fixtures/statistics", {"fixture": fixture_id})
         return data.get("response", [])
@@ -89,7 +85,7 @@ async def get_h2h(id1: int, id2: int, last: int = 6) -> list:
         return []
 
 
-def stat_value(stats: list, team_id: int, stat_name: str) -> str | None:
+def stat_value(stats: list, team_id: int, stat_name: str):
     for team_stats in stats:
         if team_stats.get("team", {}).get("id") == team_id:
             for s in team_stats.get("statistics", []):
@@ -98,8 +94,8 @@ def stat_value(stats: list, team_id: int, stat_name: str) -> str | None:
     return None
 
 
-def result(fix: dict, team_id: int) -> str:
-    home_id  = fix["teams"]["home"]["id"]
+def get_result(fix: dict, team_id: int) -> str:
+    home_id = fix["teams"]["home"]["id"]
     gh = fix["goals"]["home"] or 0
     ga = fix["goals"]["away"] or 0
     gf = gh if home_id == team_id else ga
@@ -107,285 +103,259 @@ def result(fix: dict, team_id: int) -> str:
     return "W" if gf > gc else "D" if gf == gc else "L"
 
 
-def format_fix(fix: dict, team_id: int, stats: list | None = None) -> str:
-    date     = fix["fixture"]["date"][:10]
-    home     = fix["teams"]["home"]["name"]
-    away     = fix["teams"]["away"]["name"]
-    gh       = fix["goals"]["home"]
-    ga       = fix["goals"]["away"]
-    score    = f"{gh}-{ga}" if gh is not None else "?-?"
-    res      = result(fix, team_id) if gh is not None else "?"
-    is_home  = fix["teams"]["home"]["id"] == team_id
-    loc      = "🏠" if is_home else "✈️"
-
-    extras = []
-    if stats:
-        corners_h = stat_value(stats, fix["teams"]["home"]["id"], "Corner Kicks")
-        corners_a = stat_value(stats, fix["teams"]["away"]["id"], "Corner Kicks")
-        shots_h   = stat_value(stats, fix["teams"]["home"]["id"], "Shots on Goal")
-        shots_a   = stat_value(stats, fix["teams"]["away"]["id"], "Shots on Goal")
-        ycard_h   = stat_value(stats, fix["teams"]["home"]["id"], "Yellow Cards")
-        ycard_a   = stat_value(stats, fix["teams"]["away"]["id"], "Yellow Cards")
-        rcard_h   = stat_value(stats, fix["teams"]["home"]["id"], "Red Cards")
-        rcard_a   = stat_value(stats, fix["teams"]["away"]["id"], "Red Cards")
-
-        if corners_h is not None and corners_a is not None:
-            extras.append(f"corners {corners_h}-{corners_a}")
-        if shots_h is not None and shots_a is not None:
-            extras.append(f"disparos {shots_h}-{shots_a}")
-        yh = ycard_h or 0; ya = ycard_a or 0
-        rh = rcard_h or 0; ra = rcard_a or 0
-        total_cards = int(yh) + int(ya) + int(rh) + int(ra)
-        if total_cards > 0:
-            extras.append(f"tarjetas {total_cards}")
-
-    extras_str = f" [{', '.join(extras)}]" if extras else ""
-    return f"{date} {loc} {home} {score} {away} ({res}){extras_str}"
-
-
 def avg(values: list) -> float:
     vals = [v for v in values if v is not None]
     return round(sum(vals) / len(vals), 1) if vals else 0.0
 
 
-# ── Build real data block ─────────────────────────────────────────────────────
+def format_fix_with_stats(fix: dict, team_id: int, stats: list) -> tuple[str, dict]:
+    date    = fix["fixture"]["date"][:10]
+    home    = fix["teams"]["home"]["name"]
+    away    = fix["teams"]["away"]["name"]
+    gh      = fix["goals"]["home"]
+    ga      = fix["goals"]["away"]
+    score   = f"{gh}-{ga}" if gh is not None else "?-?"
+    res     = get_result(fix, team_id) if gh is not None else "?"
+    is_home = fix["teams"]["home"]["id"] == team_id
+    loc     = "🏠" if is_home else "✈️"
 
-async def build_real_data(home_name: str, away_name: str) -> tuple[str, bool]:
-    """
-    Returns (data_block_str, success_bool).
-    Fetches last fixtures + stats for both teams + H2H.
-    """
-    home_team = await find_team(home_name)
-    away_team = await find_team(away_name)
+    stat_data = {}
+    extras = []
+    if stats:
+        h_id = fix["teams"]["home"]["id"]
+        a_id = fix["teams"]["away"]["id"]
+        c_h  = stat_value(stats, h_id, "Corner Kicks")
+        c_a  = stat_value(stats, a_id, "Corner Kicks")
+        s_h  = stat_value(stats, h_id, "Shots on Goal")
+        s_a  = stat_value(stats, a_id, "Shots on Goal")
+        y_h  = int(stat_value(stats, h_id, "Yellow Cards") or 0)
+        y_a  = int(stat_value(stats, a_id, "Yellow Cards") or 0)
+        r_h  = int(stat_value(stats, h_id, "Red Cards") or 0)
+        r_a  = int(stat_value(stats, a_id, "Red Cards") or 0)
 
-    if not home_team or not away_team:
-        missing = []
-        if not home_team: missing.append(home_name)
-        if not away_team: missing.append(away_name)
-        return f"⚠️ No se encontraron en API-Football: {', '.join(missing)}", False
+        team_corners = int(c_h if is_home else c_a) if (c_h is not None and c_a is not None) else None
+        team_shots   = int(s_h if is_home else s_a) if (s_h is not None and s_a is not None) else None
+        total_cards  = y_h + y_a + r_h + r_a
 
-    home_id   = home_team["team"]["id"]
-    away_id   = away_team["team"]["id"]
-    home_full = home_team["team"]["name"]
-    away_full = away_team["team"]["name"]
-    home_country = home_team.get("team", {}).get("country", "")
-    away_country = away_team.get("team", {}).get("country", "")
+        if team_corners is not None:
+            extras.append(f"corners:{team_corners}")
+            stat_data["corners"] = team_corners
+        if team_shots is not None:
+            extras.append(f"disp:{team_shots}")
+            stat_data["shots"] = team_shots
+        if total_cards > 0:
+            extras.append(f"tarj:{total_cards}")
+            stat_data["cards"] = total_cards
 
-    # Fetch fixtures
-    home_fixes = await get_fixtures(home_id, 12)
-    away_fixes = await get_fixtures(away_id, 12)
-    h2h_fixes  = await get_h2h(home_id, away_id, 6)
+    extras_str = f" [{', '.join(extras)}]" if extras else ""
+    line = f"{date} {loc} {home} {score} {away} ({res}){extras_str}"
+    return line, stat_data
 
-    # Fetch stats for each fixture (last 8 each to save API calls)
-    home_stats_map, away_stats_map = {}, {}
-    for fix in home_fixes[:8]:
-        fid = fix["fixture"]["id"]
-        home_stats_map[fid] = await get_fixture_stats(fid)
-    for fix in away_fixes[:8]:
-        fid = fix["fixture"]["id"]
-        if fid not in home_stats_map:
-            away_stats_map[fid] = await get_fixture_stats(fid)
 
-    # Separate home/away fixtures
-    home_at_home = [f for f in home_fixes if f["teams"]["home"]["id"] == home_id]
-    home_away    = [f for f in home_fixes if f["teams"]["away"]["id"] == home_id]
-    away_at_away = [f for f in away_fixes if f["teams"]["away"]["id"] == away_id]
-    away_at_home = [f for f in away_fixes if f["teams"]["home"]["id"] == away_id]
+async def build_team_block(team_id: int, team_name: str) -> tuple[str, dict]:
+    """Build stats block for a team. Returns (text_block, aggregated_stats)."""
+    fixtures = await get_fixtures(team_id, 12)
+    if not fixtures:
+        return f"Sin datos disponibles para {team_name}", {}
 
-    # ── HOME team stats ──
-    def team_stats_summary(fixes: list, team_id: int, stats_map: dict, label: str) -> str:
+    home_fixes = [f for f in fixtures if f["teams"]["home"]["id"] == team_id]
+    away_fixes = [f for f in fixtures if f["teams"]["away"]["id"] == team_id]
+
+    agg = {"home": {"gf":[],"ga":[],"corners":[],"shots":[],"cards":[]},
+           "away": {"gf":[],"ga":[],"corners":[],"shots":[],"cards":[]}}
+
+    async def process_fixes(fixes, loc_key):
         lines = []
-        gf_list, ga_list = [], []
-        corners_list, shots_list, cards_list = [], [], []
-
         for fix in fixes[:6]:
-            fid = fix["fixture"]["id"]
-            stats = stats_map.get(fid, [])
-            line = format_fix(fix, team_id, stats if stats else None)
+            fid   = fix["fixture"]["id"]
+            stats = await get_fixture_stats(fid)
+            line, sd = format_fix_with_stats(fix, team_id, stats)
             lines.append(f"  • {line}")
-
             gh = fix["goals"]["home"]
             ga = fix["goals"]["away"]
             if gh is not None and ga is not None:
                 is_home = fix["teams"]["home"]["id"] == team_id
-                gf_list.append(gh if is_home else ga)
-                ga_list.append(ga if is_home else gh)
+                agg[loc_key]["gf"].append(gh if is_home else ga)
+                agg[loc_key]["ga"].append(ga if is_home else gh)
+            for k in ["corners","shots","cards"]:
+                if k in sd:
+                    agg[loc_key][k].append(sd[k])
+        return lines
 
-            if stats:
-                home_id_fix = fix["teams"]["home"]["id"]
-                away_id_fix = fix["teams"]["away"]["id"]
-                c_h = stat_value(stats, home_id_fix, "Corner Kicks")
-                c_a = stat_value(stats, away_id_fix, "Corner Kicks")
-                s_h = stat_value(stats, home_id_fix, "Shots on Goal")
-                s_a = stat_value(stats, away_id_fix, "Shots on Goal")
-                y_h = stat_value(stats, home_id_fix, "Yellow Cards") or 0
-                y_a = stat_value(stats, away_id_fix, "Yellow Cards") or 0
-                r_h = stat_value(stats, home_id_fix, "Red Cards") or 0
-                r_a = stat_value(stats, away_id_fix, "Red Cards") or 0
+    home_lines = await process_fixes(home_fixes, "home")
+    away_lines = await process_fixes(away_fixes, "away")
 
-                if c_h is not None and c_a is not None:
-                    corners_list.append(int(c_h if fix["teams"]["home"]["id"] == team_id else c_a))
-                if s_h is not None and s_a is not None:
-                    shots_list.append(int(s_h if fix["teams"]["home"]["id"] == team_id else s_a))
-                total_cards = int(y_h) + int(y_a) + int(r_h) + int(r_a)
-                if total_cards >= 0:
-                    cards_list.append(total_cards)
+    def summary(loc_key, label):
+        d = agg[loc_key]
+        gf  = f"{avg(d['gf'])} marcados / {avg(d['ga'])} encajados" if d["gf"] else "sin dato"
+        cor = f"{avg(d['corners'])} por partido" if d["corners"] else "sin dato disponible"
+        sho = f"{avg(d['shots'])} por partido"   if d["shots"]   else "sin dato disponible"
+        car = f"{avg(d['cards'])} por partido"   if d["cards"]   else "sin dato disponible"
+        form_fixes = home_fixes if loc_key=="home" else away_fixes
+        form = "".join([get_result(f, team_id) for f in form_fixes[:5] if f["goals"]["home"] is not None])
+        return (
+            f"_Forma ({label}): {form or 'sin datos'}_\n"
+            f"⚽ Goles: {gf}\n"
+            f"📐 Corners: {cor}\n"
+            f"🎯 Disparos a puerta: {sho}\n"
+            f"🟨 Tarjetas: {car}"
+        )
 
-        result_str = ""
-        if lines:
-            result_str += "\n".join(lines[:6])
-        
-        summary_parts = []
-        if gf_list:
-            summary_parts.append(f"⚽ Goles: {avg(gf_list)} marcados / {avg(ga_list)} encajados por partido")
-        if corners_list:
-            summary_parts.append(f"📐 Corners: {avg(corners_list)} por partido")
+    block = (
+        f"*En casa:*\n" + ("\n".join(home_lines) if home_lines else "  Sin datos") + "\n" +
+        summary("home", "local") + "\n\n" +
+        f"*De visitante:*\n" + ("\n".join(away_lines) if away_lines else "  Sin datos") + "\n" +
+        summary("away", "visitante")
+    )
+    return block, agg
+
+
+async def build_real_data(home_name: str, away_name: str) -> tuple[str, bool]:
+    home_team = await find_team(home_name)
+    away_team = await find_team(away_name)
+
+    found_home = home_team is not None
+    found_away = away_team is not None
+
+    if not found_home and not found_away:
+        return "", False
+
+    lines = [f"╔ DATOS REALES — API-Football ({datetime.now().strftime('%d/%m/%Y %H:%M')}) ╗\n"]
+
+    if found_home:
+        home_id   = home_team["team"]["id"]
+        home_full = home_team["team"]["name"]
+        lines.append(f"🔵 *{home_full.upper()}*")
+        block, _ = await build_team_block(home_id, home_full)
+        lines.append(block)
+    else:
+        lines.append(f"🔵 *{home_name.upper()}* — No encontrado en API-Football")
+
+    if found_away:
+        away_id   = away_team["team"]["id"]
+        away_full = away_team["team"]["name"]
+        lines.append(f"\n🔴 *{away_full.upper()}*")
+        block, _ = await build_team_block(away_id, away_full)
+        lines.append(block)
+    else:
+        lines.append(f"\n🔴 *{away_name.upper()}* — No encontrado en API-Football")
+
+    if found_home and found_away:
+        h2h = await get_h2h(home_team["team"]["id"], away_team["team"]["id"], 6)
+        lines.append("\n⚔️ *H2H DIRECTO:*")
+        if h2h:
+            for fix in h2h[:5]:
+                fid   = fix["fixture"]["id"]
+                stats = await get_fixture_stats(fid)
+                line, _ = format_fix_with_stats(fix, home_team["team"]["id"], stats)
+                lines.append(f"  • {line}")
         else:
-            summary_parts.append("📐 Corners: sin dato disponible")
-        if shots_list:
-            summary_parts.append(f"🎯 Disparos a puerta: {avg(shots_list)} por partido")
-        else:
-            summary_parts.append("🎯 Disparos a puerta: sin dato disponible")
-        if cards_list:
-            summary_parts.append(f"🟨 Tarjetas totales: {avg(cards_list)} por partido")
-        else:
-            summary_parts.append("🟨 Tarjetas: sin dato disponible")
+            lines.append("  Sin datos H2H disponibles")
 
-        form = "".join([result(f, team_id) for f in fixes[:5] if f["goals"]["home"] is not None])
-        summary_parts.append(f"📊 Forma reciente: {form or 'sin datos'}")
+    api_ok = found_home or found_away
+    return "\n".join(lines), api_ok
 
-        return result_str + "\n" + "\n".join(summary_parts)
-
-    home_home_block = team_stats_summary(home_at_home, home_id, home_stats_map, "casa")
-    home_away_block = team_stats_summary(home_away, home_id, home_stats_map, "fuera")
-    away_home_block = team_stats_summary(away_at_home, away_id, away_stats_map, "casa")
-    away_away_block = team_stats_summary(away_at_away, away_id, away_stats_map, "fuera")
-
-    # H2H
-    h2h_lines = []
-    h2h_goals, h2h_corners, h2h_cards = [], [], []
-    for fix in h2h_fixes[:5]:
-        fid = fix["fixture"]["id"]
-        stats = home_stats_map.get(fid) or away_stats_map.get(fid) or []
-        h2h_lines.append(f"  • {format_fix(fix, home_id, stats if stats else None)}")
-        gh = fix["goals"]["home"]
-        ga = fix["goals"]["away"]
-        if gh is not None and ga is not None:
-            h2h_goals.append(gh + ga)
-
-    data_block = f"""
-╔══════════════════════════════════════╗
-  DATOS REALES — API-FOOTBALL
-  {home_full} ({home_country}) vs {away_full} ({away_country})
-  Extraídos: {datetime.now().strftime('%d/%m/%Y %H:%M')}
-╚══════════════════════════════════════╝
-
-🔵 {home_full.upper()} — EN CASA (últimos partidos como LOCAL):
-{home_home_block}
-
-🔵 {home_full.upper()} — DE VISITANTE (últimos partidos como VISITANTE):
-{home_away_block}
-
-🔴 {away_full.upper()} — EN CASA (últimos partidos como LOCAL):
-{away_home_block}
-
-🔴 {away_full.upper()} — DE VISITANTE (últimos partidos como VISITANTE):
-{away_away_block}
-
-⚔️ H2H — ÚLTIMOS ENFRENTAMIENTOS DIRECTOS:
-{chr(10).join(h2h_lines) if h2h_lines else "  Sin datos H2H disponibles"}
-{"  Goles medios por partido: " + str(avg(h2h_goals)) if h2h_goals else ""}
-"""
-    return data_block.strip(), True
-
-
-# ── Prompt ────────────────────────────────────────────────────────────────────
 
 def build_prompt(home: str, away: str, conditions: list[dict], data_block: str, api_ok: bool) -> str:
+    now = datetime.now()
+    current_date = now.strftime("%d/%m/%Y")
     conditions_block = "\n".join(
         f"  - [{c['id']}] {c['label']} (peso {c['weight']}/10)"
         for c in conditions
     )
+    max_pts = sum(c['weight'] for c in conditions)
 
-    data_instruction = f"""
-A continuación tienes los DATOS REALES extraídos de API-Football.
-ÚSALOS como única fuente de verdad. NO los contradigas ni los ignores.
+    if api_ok:
+        data_section = f"""
+Los siguientes datos son REALES extraídos de API-Football ahora mismo ({current_date}).
+Úsalos como fuente principal. NO los contradigas.
 Si algún campo dice "sin dato disponible", indícalo igual en el análisis.
 
 {data_block}
-""" if api_ok else f"""
-⚠️ No se pudieron obtener datos de API-Football. 
-Usa la herramienta web_search para buscar los datos más recientes disponibles.
-Indica claramente qué datos son aproximados.
 
-{data_block}
+IMPORTANTE: Para los equipos o estadísticas NO encontrados en API-Football,
+usa la herramienta web_search buscando en Sofascore o Flashscore:
+- "site:sofascore.com {home} estadísticas 2026"
+- "site:sofascore.com {away} estadísticas 2026"
+- "{home} {away} flashscore head to head"
+"""
+    else:
+        data_section = f"""
+API-Football no tiene datos de estos equipos (probablemente liga regional).
+DEBES usar web_search para buscar en Sofascore y Flashscore:
+1. "site:sofascore.com {home} resultados 2026"
+2. "site:sofascore.com {away} resultados 2026"
+3. "{home} {away} sofascore head to head"
+4. "{home} corners tarjetas estadísticas sofascore"
+5. "{away} corners tarjetas estadísticas sofascore"
+6. "flashscore {home} {away}"
+
+Usa ÚNICAMENTE los datos encontrados. Si no encuentras un dato, escribe "sin dato disponible".
 """
 
-    return f"""Eres un analista deportivo experto en fútbol. Genera el análisis del partido *{home}* (local) vs *{away}* (visitante).
+    return f"""Eres un analista deportivo experto. Genera el análisis del partido *{home}* (local) vs *{away}* (visitante). Hoy: {current_date}.
 
-{data_instruction}
+{data_section}
 
-ESTRUCTURA OBLIGATORIA — usa exactamente estos bloques:
+ESTRUCTURA OBLIGATORIA:
 
 *⚽ {home.upper()} vs {away.upper()}*
 
 *📋 1. CONTEXTO*
-- Competición y contexto del partido
+- Competición, jornada y clasificación actual
 
 *🔵 2. {home.upper()} — TENDENCIAS*
-_Como local:_
-- Últimos resultados en casa con estadísticas
-- Promedio goles / corners / disparos / tarjetas en casa
+_Como local (últimos partidos en casa):_
+- Resultados con fecha, marcador y estadísticas (corners, disparos, tarjetas)
+- ⚽ Promedio goles en casa
+- 📐 Corners en casa
+- 🎯 Disparos a puerta en casa
+- 🟨 Tarjetas en casa
 
-_Como visitante (contexto general):_
-- Forma fuera de casa resumida
+_Como visitante (resumen):_
+- Forma y promedios fuera de casa
 
 *🔴 3. {away.upper()} — TENDENCIAS*
-_Como visitante:_
-- Últimos resultados fuera con estadísticas
-- Promedio goles / corners / disparos / tarjetas fuera
+_Como visitante (últimos partidos fuera):_
+- Resultados con fecha, marcador y estadísticas
+- ⚽ Promedio goles fuera
+- 📐 Corners fuera
+- 🎯 Disparos a puerta fuera
+- 🟨 Tarjetas fuera
 
-_Como local (contexto general):_
-- Forma en casa resumida
+_Como local (resumen):_
+- Forma y promedios en casa
 
 *⚔️ 4. H2H DIRECTO*
-- Enfrentamientos con estadísticas reales
+- Últimos enfrentamientos con estadísticas reales
 - Goles, corners y tarjetas medias
 
 *✅ 5. CONDICIONES ({len(conditions)} evaluadas)*
-Para cada condición, basándote SOLO en los datos reales de arriba:
+Evalúa cada condición con los datos reales:
 {conditions_block}
 
-Tabla:
-| Condición | Estado | Peso | Pts |
+Tabla resumen:
+| Condición | ✅/❌ | Peso | Pts |
 
-*📊 6. PUNTUACIÓN*
-- XX / {sum(c['weight'] for c in conditions)} pts → XX%
-- FAVORABLE / NEUTRO / DESFAVORABLE
+*📊 6. PUNTUACIÓN GLOBAL*
+- Puntos obtenidos / {max_pts} máximos → XX%
+- FAVORABLE (>60%) / NEUTRO (40-60%) / DESFAVORABLE (<40%)
 
 *🔮 7. CONCLUSIÓN*
-- Mercados avalados por datos reales: goles, corners, tarjetas
+- Mercados avalados: goles, corners, tarjetas
 
 Formato Markdown Telegram. Máximo 4000 caracteres.
-{"📡 _Fuente: API-Football (datos en tiempo real)_" if api_ok else "⚠️ _Fuente: búsqueda web (datos aproximados)_"}
+{"📡 _Fuente: API-Football + Sofascore_" if api_ok else "📡 _Fuente: Sofascore / Flashscore (búsqueda web)_"}
 """
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-async def analyze_match(
-    home: str,
-    away: str,
-    conditions: list[dict] | None = None
-) -> str:
+async def analyze_match(home: str, away: str, conditions: list[dict] | None = None) -> str:
     if conditions is None:
         conditions = DEFAULT_CONDITIONS
 
-    # 1. Fetch real data from API-Football
     data_block, api_ok = await build_real_data(home, away)
-    logger.info(f"API-Football data fetched (ok={api_ok}) for {home} vs {away}")
+    logger.info(f"API-Football ok={api_ok} for {home} vs {away}")
 
-    # 2. Build prompt with real data
     prompt = build_prompt(home, away, conditions, data_block, api_ok)
 
     headers = {
@@ -394,23 +364,19 @@ async def analyze_match(
         "content-type": "application/json",
     }
 
-    tools = []
-    if not api_ok:
-        tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
-
     body = {
         "model": "claude-sonnet-4-6",
         "max_tokens": 5000,
+        "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}],
         "messages": [{"role": "user", "content": prompt}],
         "system": (
             "Eres un analista deportivo experto en fútbol. Respondes siempre en español. "
-            "Cuando recibes datos reales de API-Football, los usas fielmente sin inventar nada. "
-            "Cuando un dato no está disponible, lo indicas claramente. "
-            "Tu formato es Markdown compatible con Telegram."
+            "Cuando recibes datos reales de API-Football, los usas fielmente. "
+            "Para datos no disponibles en API-Football, usas web_search buscando en Sofascore y Flashscore. "
+            "NUNCA inventas estadísticas. Si no encuentras un dato lo indicas claramente. "
+            "Formato Markdown compatible con Telegram."
         ),
     }
-    if tools:
-        body["tools"] = tools
 
     try:
         async with httpx.AsyncClient(timeout=120) as client:
