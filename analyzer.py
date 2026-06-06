@@ -229,73 +229,108 @@ def build_prompt(home: str, away: str, conditions: list[dict], data: dict) -> st
     data_str = "\n".join(blocks)
 
     web_instruction = "" if data["api_ok"] else f"""
-API-Football no tiene estos equipos. Usa web_search:
-1. "sofascore {home} resultados 2026"
-2. "sofascore {away} resultados 2026"  
-3. "sofascore {home} {away} head to head"
-4. "{home} corners tarjetas estadísticas"
-5. "{away} corners tarjetas estadísticas"
+API-Football no tiene datos de estos equipos. Usa web_search ANTES de responder:
+1. "sofascore {home} resultados estadísticas 2026"
+2. "sofascore {away} resultados estadísticas 2026"
+3. "{home} {away} head to head sofascore"
+4. "{home} corners tarjetas por partido estadísticas"
+5. "{away} corners tarjetas por partido estadísticas"
 """
 
-    return f"""Eres un analista deportivo experto. Genera un análisis CONCISO y VISUAL del partido *{home}* vs *{away}*.
+    return f"""Eres un analista deportivo experto en fútbol. Tu trabajo es generar un informe claro, visual y fácil de entender para alguien que quiere apostar o analizar el partido *{home}* (local) vs *{away}* (visitante).
 
 {web_instruction}
 
+DATOS DISPONIBLES:
 {data_str}
 
-Para datos marcados como "s/d", búscalos con web_search en Sofascore o Flashscore antes de responder.
+Para cualquier dato marcado como "s/d", búscalo con web_search en Sofascore antes de escribir el análisis.
 
-FORMATO OBLIGATORIO (copia exactamente esta estructura, compacta y visual):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INSTRUCCIONES DE FORMATO — sigue esto AL PIE DE LA LETRA:
 
-*⚽ {home.upper()} vs {away.upper()}*
-_[competición] · [fecha si conoces]_
+1. Escribe siempre en español claro y directo. Sin tecnicismos innecesarios.
+2. Cuando pongas estadísticas, explica qué significa. Por ejemplo:
+   - NO escribas: "Corners: s/d | Disparos: s/d | -1.5 goles 1T"
+   - SÍ escribe: "⚽ Marca de media 1.8 goles por partido en casa" o "📐 No hay datos de córners disponibles"
+3. Los resultados recientes ponlos como: ✅ Ganó 2-1 vs Rival · ❌ Perdió 0-1 vs Rival · 🟡 Empató 1-1 vs Rival
+4. Las condiciones explícalas en lenguaje natural: no pongas IDs técnicos como [btts] o [over25]
+5. La puntuación final exprésala con una barra de progreso visual y una frase clara
 
-━━━━━━━━━━━━━━━━
-*🔵 {home} — En casa*
-[5 resultados recientes como: ✅2-1 Rival · ❌0-1 Rival · 🟡1-1 Rival]
-Forma: [WDLWW] | Goles: [X] marc / [X] enc
-📐 Corners: [X] | 🎯 Disparos: [X] | 🟨 Tarj: [X]
+ESTRUCTURA EXACTA A SEGUIR:
 
-*🔵 {home} — De visitante*
-Forma: [WDLWW] | Goles: [X] marc / [X] enc
-
-━━━━━━━━━━━━━━━━
-*🔴 {away} — De visitante*
-[5 resultados recientes fuera]
-Forma: [WDLWW] | Goles: [X] marc / [X] enc
-📐 Corners: [X] | 🎯 Disparos: [X] | 🟨 Tarj: [X]
-
-*🔴 {away} — En casa*
-Forma: [WDLWW] | Goles: [X] marc / [X] enc
+⚽ *{home.upper()} vs {away.upper()}*
+_[Competición y contexto del partido]_
 
 ━━━━━━━━━━━━━━━━
-*⚔️ H2H* (últimos enfrentamientos)
-[fecha] Equipo X-X Equipo
-[fecha] Equipo X-X Equipo
-Goles medios: [X] | Tarjetas medias: [X]
+🔵 *{home} jugando EN CASA*
+Últimos partidos en casa:
+✅/❌/🟡 [resultado] vs [rival] · ✅/❌/🟡 [resultado] vs [rival] · ...
+
+📊 Rendimiento en casa:
+• Gana el [X]% de sus partidos en casa
+• Marca de media [X] goles y encaja [X] por partido
+• Córners por partido: [X] (o "sin datos disponibles")
+• Disparos a puerta: [X] por partido (o "sin datos disponibles")  
+• Tarjetas: [X] por partido (o "sin datos disponibles")
+
+🔵 *{home} jugando FUERA*
+• Forma fuera: [X] victorias, [X] empates, [X] derrotas en últimos 5
+• Goles fuera: marca [X] y encaja [X] de media
 
 ━━━━━━━━━━━━━━━━
-*✅ CONDICIONES*
-[evalúa cada una en formato: ✅/❌/⚠️ Nombre — justificación breve]
-Ejemplo: ✅ BTTS — ambos marcan en 4/5 últimos en casa
-Ejemplo: ❌ +2.5 goles — media de 1.8 goles/partido
-Ejemplo: ⚠️ Corners — sin dato disponible
+🔴 *{away} jugando FUERA DE CASA*
+Últimos partidos fuera:
+✅/❌/🟡 [resultado] vs [rival] · ...
 
-*📊 [XX]/{max_pts} pts → [XX]%*
-🟢 FAVORABLE / 🟡 NEUTRO / 🔴 DESFAVORABLE
+📊 Rendimiento fuera:
+• Gana el [X]% de sus partidos fuera
+• Marca de media [X] goles y encaja [X] por partido
+• Córners por partido: [X] (o "sin datos disponibles")
+• Disparos a puerta: [X] por partido (o "sin datos disponibles")
+• Tarjetas: [X] por partido (o "sin datos disponibles")
+
+🔴 *{away} jugando EN CASA*
+• Forma en casa: [X] victorias, [X] empates, [X] derrotas en últimos 5
+• Goles en casa: marca [X] y encaja [X] de media
 
 ━━━━━━━━━━━━━━━━
-*🔮 Conclusión*
-[2-3 líneas máximo con los mercados más respaldados]
+⚔️ *Historial de enfrentamientos directos*
+[fecha] [equipo] [X]-[X] [equipo] — ganó/empató/perdió [equipo local]
+[fecha] ...
+📌 En los últimos [X] enfrentamientos: [equipo] ganó [X] veces, [X] empates, [equipo] ganó [X] veces
+📌 Media de goles por partido entre ellos: [X]
 
-📡 _{"API-Football" if data["api_ok"] else "Sofascore/Flashscore"} · {now}_
+━━━━━━━━━━━━━━━━
+✅ *Análisis de condiciones*
+Evalúa cada condición con una explicación humana y clara:
 
-REGLAS:
-- Máximo 3500 caracteres en total
-- Usa s/d si no tienes el dato, nunca inventes
-- Las condiciones en formato lista compacta, una por línea
-- Sin tablas markdown (no renderizan bien en Telegram)
+✅ o ❌ o ⚠️ *[Nombre legible de la condición]*
+_[Explicación en 1 frase: qué datos lo confirman o lo desmienten. Si no hay datos, dilo claramente]_
+
+Condiciones a evaluar (usa nombres legibles, NO los IDs técnicos):
+{conditions_block}
+
+━━━━━━━━━━━━━━━━
+📊 *Puntuación del análisis*
+Puntos conseguidos: [X] de {max_pts} posibles
+Porcentaje: [███████░░░] [X]%
+Veredicto: 🟢 MUY FAVORABLE / 🟡 DUDOSO / 🔴 NO RECOMENDABLE
+
+━━━━━━━━━━━━━━━━
+🔮 *Conclusión*
+[2-3 frases máximo explicando qué mercados tienen más sentido según los datos: goles, córners, tarjetas, resultado]
+
+📡 _{"Datos: API-Football + Sofascore" if data["api_ok"] else "Datos: Sofascore/Flashscore"} · {now}_
+━━━━━━━━━━━━━━━━
+
+REGLAS FINALES:
+- Máximo 4000 caracteres
+- NUNCA escribas códigos técnicos como [btts], [over25], s/d sin explicar
+- Si no tienes un dato, escribe "sin datos disponibles" en texto normal
+- El análisis debe entenderlo alguien que no sabe de estadísticas
 """
+
 
 async def analyze_match(home: str, away: str, conditions: list[dict] | None = None) -> str:
     if conditions is None:
