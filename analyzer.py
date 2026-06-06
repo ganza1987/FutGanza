@@ -8,13 +8,18 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_URL     = "https://api.anthropic.com/v1/messages"
 
 DEFAULT_CONDITIONS = [
-    {"id": "btts",         "label": "Ambos equipos marcan (BTTS)",                     "weight": 8},
-    {"id": "over25",       "label": "Más de 2.5 goles en el partido",                   "weight": 7},
-    {"id": "home_form",    "label": "El local tiene mejor forma reciente",              "weight": 6},
-    {"id": "away_goals",   "label": "Visitante promedia >1.5 goles/partido",            "weight": 5},
-    {"id": "clean_sheet",  "label": "Al menos un equipo con portería a 0 en últimos 3", "weight": 4},
-    {"id": "home_unbeaten","label": "Local invicto en sus últimos 5",                   "weight": 6},
-    {"id": "h2h_goals",    "label": "H2H histórico: partidos con goles de ambos",       "weight": 5},
+    {"id": "btts",          "label": "Ambos equipos marcan (BTTS)",                        "weight": 8},
+    {"id": "over25",        "label": "Más de 2.5 goles en el partido",                      "weight": 7},
+    {"id": "home_form",     "label": "El local tiene mejor forma reciente",                 "weight": 6},
+    {"id": "away_goals",    "label": "Visitante promedia >1.5 goles/partido",               "weight": 5},
+    {"id": "clean_sheet",   "label": "Al menos un equipo con portería a 0 en últimos 3",    "weight": 4},
+    {"id": "home_unbeaten", "label": "Local invicto en sus últimos 5",                      "weight": 6},
+    {"id": "h2h_goals",     "label": "H2H histórico: partidos con goles de ambos",          "weight": 5},
+    {"id": "over85corners", "label": "Más de 8.5 corners totales en el partido",            "weight": 6},
+    {"id": "home_corners",  "label": "Local promedia más de 5 corners por partido en casa", "weight": 5},
+    {"id": "away_corners",  "label": "Visitante promedia más de 4 corners fuera de casa",   "weight": 4},
+    {"id": "shots_home",    "label": "Local promedia más de 5 disparos a puerta en casa",   "weight": 5},
+    {"id": "shots_away",    "label": "Visitante promedia más de 4 disparos a puerta fuera", "weight": 4},
 ]
 
 
@@ -23,16 +28,17 @@ def build_prompt(home: str, away: str, conditions: list[dict]) -> str:
         f"  - [{c['id']}] {c['label']} (peso {c['weight']}/10)"
         for c in conditions
     )
-    return f"""Eres un analista deportivo experto. Debes generar un análisis REAL y ACTUALIZADO del partido entre *{home}* (local) y *{away}* (visitante).
+    return f"""Eres un analista deportivo experto en fútbol. Genera un análisis REAL y ACTUALIZADO del partido entre *{home}* (local) y *{away}* (visitante).
 
-PASO 1 — BÚSQUEDA OBLIGATORIA:
-Antes de escribir el análisis, usa la herramienta web_search para buscar:
+PASO 1 — BÚSQUEDAS OBLIGATORIAS (realiza TODAS antes de escribir el análisis):
 1. "{home} últimos partidos resultados 2025 2026"
-2. "{away} últimos partidos resultados 2025 2026"  
+2. "{away} últimos partidos resultados 2025 2026"
 3. "{home} vs {away} historial head to head"
+4. "{home} corners disparos estadísticas 2025 2026"
+5. "{away} corners disparos estadísticas 2025 2026"
 
 PASO 2 — ANÁLISIS con los datos encontrados:
-Usa ÚNICAMENTE los datos reales encontrados en las búsquedas. Si no encuentras un dato concreto, escribe "sin dato disponible" en lugar de inventarlo.
+Usa ÚNICAMENTE datos reales de las búsquedas. Si no encuentras un dato concreto, escribe "sin dato disponible".
 
 ESTRUCTURA OBLIGATORIA:
 
@@ -41,24 +47,28 @@ ESTRUCTURA OBLIGATORIA:
 *📋 1. CONTEXTO*
 - Competición y contexto actual
 
-*🔵 2. {home.upper()} — TENDENCIAS REALES*
+*🔵 2. {home.upper()} — TENDENCIAS*
 - Últimos 5 partidos con fechas y marcadores reales
-- Forma: W/D/L de los últimos 5
-- Promedio goles marcados / encajados
+- Forma: W/D/L últimos 5
+- Promedio goles marcados / encajados en casa
+- 📐 Corners: promedio por partido en casa (si disponible)
+- 🎯 Disparos a puerta: promedio por partido en casa (si disponible)
 - Tendencia estadística destacada
 
-*🔴 3. {away.upper()} — TENDENCIAS REALES*
+*🔴 3. {away.upper()} — TENDENCIAS*
 - Últimos 5 partidos con fechas y marcadores reales
-- Forma: W/D/L de los últimos 5
-- Promedio goles marcados / encajados
+- Forma: W/D/L últimos 5
+- Promedio goles marcados / encajados fuera de casa
+- 📐 Corners: promedio por partido fuera de casa (si disponible)
+- 🎯 Disparos a puerta: promedio por partido fuera de casa (si disponible)
 - Tendencia estadística destacada
 
 *⚔️ 4. H2H DIRECTO*
-- Últimos enfrentamientos directos reales
-- Dominio histórico y goles medios
+- Últimos enfrentamientos directos reales con marcadores
+- Dominio histórico, goles medios y corners medios si disponible
 
 *✅ 5. EVALUACIÓN DE CONDICIONES*
-Para cada condición indica ✅ SE CUMPLE o ❌ NO SE CUMPLE con justificación basada en datos reales buscados:
+Para cada condición indica ✅ SE CUMPLE o ❌ NO SE CUMPLE con justificación basada en datos reales:
 
 {conditions_block}
 
@@ -72,9 +82,9 @@ Condición | ✅/❌ | Peso | Pts
 
 *🔮 7. CONCLUSIÓN*
 - Tendencia principal avalada por datos reales
-- Mercado más respaldado
+- Mercados más respaldados (goles, corners, disparos)
 
-Formato: Markdown Telegram (negrita *, cursiva _). Máximo 3500 caracteres.
+Formato: Markdown Telegram (negrita *, cursiva _). Máximo 4000 caracteres.
 Al final añade: 📡 _Fuente: búsqueda web en tiempo real_
 """
 
@@ -95,22 +105,21 @@ async def analyze_match(
         "content-type": "application/json",
     }
 
-    # Use web_search tool so Claude can fetch real data
     body = {
         "model": "claude-sonnet-4-6",
-        "max_tokens": 4000,
+        "max_tokens": 5000,
         "tools": [
             {
                 "type": "web_search_20250305",
                 "name": "web_search",
-                "max_uses": 5
+                "max_uses": 8
             }
         ],
         "messages": [{"role": "user", "content": prompt}],
         "system": (
             "Eres un analista deportivo experto en fútbol. Respondes siempre en español. "
-            "SIEMPRE usas la herramienta web_search para buscar datos reales y actualizados antes de responder. "
-            "NUNCA inventas resultados o estadísticas. Si no encuentras un dato, lo indicas claramente. "
+            "SIEMPRE usas web_search para buscar datos reales antes de responder. "
+            "NUNCA inventas resultados, corners ni estadísticas. Si no encuentras un dato, lo indicas claramente. "
             "Tu formato de salida es Markdown compatible con Telegram."
         ),
     }
@@ -120,7 +129,6 @@ async def analyze_match(
             r = await client.post(ANTHROPIC_URL, headers=headers, json=body)
             r.raise_for_status()
             data = r.json()
-            # Extract text from response (may contain tool_use blocks)
             text_parts = [
                 block["text"]
                 for block in data.get("content", [])
