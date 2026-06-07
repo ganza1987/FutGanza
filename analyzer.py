@@ -172,125 +172,126 @@ def nd(val, suffix=""):
 
 def build_prompt(home: str, away: str, conditions: list[dict], data: dict) -> str:
     now = datetime.now().strftime("%d/%m/%Y")
-    max_pts = sum(c["weight"] for c in conditions)
-    conditions_block = "\n".join(
-        f'  [{c["id"]}] {c["label"]} — peso {c["weight"]}pts'
-        for c in conditions
-    )
 
-    # Build data block
+    # ── Detect what data we actually have ──────────────────────────────────────
+    hd = data.get("home_data") or {}
+    ad = data.get("away_data") or {}
+
+    has_home_corners = hd.get("home", {}).get("corners") is not None or hd.get("away", {}).get("corners") is not None
+    has_away_corners = ad.get("home", {}).get("corners") is not None or ad.get("away", {}).get("corners") is not None
+    has_corners = has_home_corners or has_away_corners
+
+    has_home_shots = hd.get("home", {}).get("shots") is not None or hd.get("away", {}).get("shots") is not None
+    has_away_shots = ad.get("home", {}).get("shots") is not None or ad.get("away", {}).get("shots") is not None
+    has_shots = has_home_shots or has_away_shots
+
+    has_home_cards = hd.get("home", {}).get("cards") is not None or hd.get("away", {}).get("cards") is not None
+    has_away_cards = ad.get("home", {}).get("cards") is not None or ad.get("away", {}).get("cards") is not None
+    has_cards = has_home_cards or has_away_cards
+
+    # Filter conditions: skip corners/shots/cards if no data available
+    CORNERS_IDS = {"over85corners", "home_corners", "away_corners"}
+    SHOTS_IDS   = {"shots_home", "shots_away"}
+    CARDS_IDS   = {"cards_over25", "cards_home", "cards_away", "cards_h2h"}
+
+    active_conditions = []
+    skipped_conditions = []
+    for c in conditions:
+        if c["id"] in CORNERS_IDS and not has_corners:
+            skipped_conditions.append(c["label"])
+        elif c["id"] in SHOTS_IDS and not has_shots:
+            skipped_conditions.append(c["label"])
+        elif c["id"] in CARDS_IDS and not has_cards:
+            skipped_conditions.append(c["label"])
+        else:
+            active_conditions.append(c)
+
+    max_pts = sum(c["weight"] for c in active_conditions)
+
+    # ── Build data block ───────────────────────────────────────────────────────
     blocks = [f"=== DATOS REALES ({now}) ===\n"]
 
-    if data["home_data"]:
-        hd = data["home_data"]
+    if data.get("home_data"):
         hn = data["home_team"]["team"]["name"]
-        home_results = " · ".join([fmt_result(f, data["home_team"]["team"]["id"]) for f in hd["home"]["fixes"]])
-        away_results = " · ".join([fmt_result(f, data["home_team"]["team"]["id"]) for f in hd["away"]["fixes"]])
+        home_results = " ".join([fmt_result(f, data["home_team"]["team"]["id"]) for f in hd["home"]["fixes"]])
+        away_results = " ".join([fmt_result(f, data["home_team"]["team"]["id"]) for f in hd["away"]["fixes"]])
+        corners_str = f" | Córners: {nd(hd['home']['corners'])}" if has_corners else ""
+        shots_str   = f" | Disparos: {nd(hd['home']['shots'])}"  if has_shots   else ""
+        cards_str   = f" | Tarj: {nd(hd['home']['cards'])}"      if has_cards   else ""
         blocks.append(
             f"🔵 {hn.upper()}\n"
-            f"  En casa: {home_results}\n"
-            f"  Forma casa: {hd['home']['form']} | Goles: {nd(hd['home']['gf'])} marc / {nd(hd['home']['ga'])} enc\n"
-            f"  Corners casa: {nd(hd['home']['corners'])} | Disparos: {nd(hd['home']['shots'])} | Tarjetas: {nd(hd['home']['cards'])}\n"
-            f"  De visitante: {away_results}\n"
-            f"  Forma fuera: {hd['away']['form']} | Goles: {nd(hd['away']['gf'])} marc / {nd(hd['away']['ga'])} enc\n"
-            f"  Corners fuera: {nd(hd['away']['corners'])} | Disparos: {nd(hd['away']['shots'])} | Tarjetas: {nd(hd['away']['cards'])}"
+            f"  Casa: {home_results} | Goles: {nd(hd['home']['gf'])} marc / {nd(hd['home']['ga'])} enc{corners_str}{shots_str}{cards_str}\n"
+            f"  Fuera: {away_results} | Goles: {nd(hd['away']['gf'])} marc / {nd(hd['away']['ga'])} enc"
         )
     else:
         blocks.append(f"🔵 {home.upper()} — No encontrado en API-Football")
 
-    if data["away_data"]:
-        ad = data["away_data"]
+    if data.get("away_data"):
         an = data["away_team"]["team"]["name"]
-        home_results = " · ".join([fmt_result(f, data["away_team"]["team"]["id"]) for f in ad["home"]["fixes"]])
-        away_results = " · ".join([fmt_result(f, data["away_team"]["team"]["id"]) for f in ad["away"]["fixes"]])
+        home_results = " ".join([fmt_result(f, data["away_team"]["team"]["id"]) for f in ad["home"]["fixes"]])
+        away_results = " ".join([fmt_result(f, data["away_team"]["team"]["id"]) for f in ad["away"]["fixes"]])
+        corners_str = f" | Córners: {nd(ad['away']['corners'])}" if has_corners else ""
+        shots_str   = f" | Disparos: {nd(ad['away']['shots'])}"  if has_shots   else ""
+        cards_str   = f" | Tarj: {nd(ad['away']['cards'])}"      if has_cards   else ""
         blocks.append(
             f"\n🔴 {an.upper()}\n"
-            f"  En casa: {home_results}\n"
-            f"  Forma casa: {ad['home']['form']} | Goles: {nd(ad['home']['gf'])} marc / {nd(ad['home']['ga'])} enc\n"
-            f"  Corners casa: {nd(ad['home']['corners'])} | Disparos: {nd(ad['home']['shots'])} | Tarjetas: {nd(ad['home']['cards'])}\n"
-            f"  De visitante: {away_results}\n"
-            f"  Forma fuera: {ad['away']['form']} | Goles: {nd(ad['away']['gf'])} marc / {nd(ad['away']['ga'])} enc\n"
-            f"  Corners fuera: {nd(ad['away']['corners'])} | Disparos: {nd(ad['away']['shots'])} | Tarjetas: {nd(ad['away']['cards'])}"
+            f"  Fuera: {away_results} | Goles: {nd(ad['away']['gf'])} marc / {nd(ad['away']['ga'])} enc{corners_str}{shots_str}{cards_str}\n"
+            f"  Casa: {home_results} | Goles: {nd(ad['home']['gf'])} marc / {nd(ad['home']['ga'])} enc"
         )
     else:
         blocks.append(f"\n🔴 {away.upper()} — No encontrado en API-Football")
 
-    if data["h2h"]:
+    if data.get("h2h"):
         h2h_lines = []
-        for fix in data["h2h"][:5]:
+        for fix in data["h2h"][:3]:
             d = fix["fixture"]["date"][:10]
             gh = fix["goals"]["home"]
             ga = fix["goals"]["away"]
-            hn2 = fix["teams"]["home"]["name"][:10]
-            an2 = fix["teams"]["away"]["name"][:10]
-            h2h_lines.append(f"  {d} {hn2} {gh}-{ga} {an2}")
-        blocks.append("\n⚔️ H2H:\n" + "\n".join(h2h_lines))
+            hn2 = fix["teams"]["home"]["name"][:8]
+            an2 = fix["teams"]["away"]["name"][:8]
+            h2h_lines.append(f"{d} {hn2} {gh}-{ga} {an2}")
+        blocks.append("\n⚔️ H2H: " + " | ".join(h2h_lines))
 
     data_str = "\n".join(blocks)
 
     web_instruction = "" if data["api_ok"] else f"""
-API-Football no tiene datos de estos equipos. Usa web_search ANTES de responder:
-1. "sofascore {home} resultados estadísticas 2026"
-2. "sofascore {away} resultados estadísticas 2026"
-3. "{home} {away} head to head sofascore"
-4. "{home} corners tarjetas por partido estadísticas"
-5. "{away} corners tarjetas por partido estadísticas"
+API-Football no tiene datos. Usa web_search:
+1. "sofascore {home} resultados 2026"
+2. "sofascore {away} resultados 2026"
+3. "{home} {away} head to head"
 """
 
-    cond_short = "\n".join(
-        f'• {c["label"]} (peso {c["weight"]})'
-        for c in conditions
-    )
+    cond_list = "\n".join(f'• {c["label"]} (peso {c["weight"]})' for c in active_conditions)
+    skipped_note = f"\n_Condiciones omitidas por falta de datos: {', '.join(skipped_conditions)}_" if skipped_conditions else ""
 
-    return f"""Analista deportivo experto. Informe claro y visual para Telegram del partido *{home}* vs *{away}*.
+    return f"""Analista deportivo. Análisis BREVE para Telegram. Máximo 1800 caracteres.
 
 {web_instruction}
 DATOS:
 {data_str}
 
-Si hay datos "s/d", búscalos en Sofascore con web_search.
+CONDICIONES A EVALUAR (solo estas, ignorar las que no tienen datos):
+{cond_list}
 
-FORMATO (español, sin tecnicismos, máx 3500 caracteres):
+FORMATO EXACTO:
 
 ⚽ *{home.upper()} vs {away.upper()}*
-_[competición]_
+_[competición] · {now}_
+
+🔵 *{home}* · [✅❌🟡 x5 en casa en una línea]
+🔴 *{away}* · [✅❌🟡 x5 fuera en una línea]
+⚔️ H2H · [últimos 3] · media goles: X
 
 ━━━━━━━━━━━━━━━━
-🔵 *{home} en casa*
-[últimos 5: ✅Ganó X-X vs Rival · ❌Perdió · 🟡Empató]
-• Gana el X% en casa | Marca X goles, encaja X de media
-• Córners: X/partido | Disparos: X/partido | Tarjetas: X/partido
+✅ *Condiciones*
+[cada condición en UNA línea: ✅/❌ Nombre — motivo en 5 palabras max]
+{skipped_note}
 
-🔵 *{home} fuera*
-• X victorias, X empates, X derrotas en últimos 5 fuera
-• Marca X y encaja X de media fuera
+📊 *X/{max_pts} pts · X%*
+🟢 FAVORABLE / 🟡 DUDOSO / 🔴 NO RECOMENDABLE
 
-━━━━━━━━━━━━━━━━
-🔴 *{away} fuera*
-[últimos 5 fuera: ✅/❌/🟡]
-• Gana el X% fuera | Marca X, encaja X de media fuera
-• Córners: X/partido | Disparos: X/partido | Tarjetas: X/partido
-
-🔴 *{away} en casa*
-• X victorias, X empates, X derrotas en últimos 5 en casa
-
-━━━━━━━━━━━━━━━━
-⚔️ *Historial directo*
-[fecha] Equipo X-X Equipo
-📌 [equipo] domina con X victorias. Media X goles/partido.
-
-━━━━━━━━━━━━━━━━
-✅ *Condiciones* (✅ se cumple · ❌ no · ⚠️ sin datos)
-{cond_short}
-[Para cada una: ✅/❌/⚠️ Nombre — una frase explicando por qué]
-
-━━━━━━━━━━━━━━━━
-📊 *Puntuación: X/{max_pts} pts ([X]%)*
-[████████░░] 🟢 FAVORABLE / 🟡 DUDOSO / 🔴 NO RECOMENDABLE
-
-🔮 *Conclusión:* [2 frases: qué mercados avalan los datos]
-📡 _{"API-Football" if data["api_ok"] else "Sofascore"} · {now}_
-"""
+🔮 [1 frase conclusión]
+📡 _{"API-Football" if data["api_ok"] else "Sofascore"} · {now}_"""
 
 
 async def analyze_match(home: str, away: str, conditions: list[dict] | None = None) -> str:
