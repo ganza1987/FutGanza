@@ -266,6 +266,11 @@ API-Football no tiene datos. Usa web_search:
 
     return f"""Analista deportivo. Análisis BREVE para Telegram. Máximo 1800 caracteres.
 
+REGLA CRÍTICA: NUNCA calcules ni inventes porcentajes, promedios o estadísticas agregadas 
+(como "88.9% terminaron con más de 2.5 goles" o "0% de porterías a cero") a menos que 
+estén EXPLÍCITAMENTE en los datos proporcionados partido a partido. 
+Si no tienes ese dato exacto, simplemente no lo menciones.
+
 {web_instruction}
 DATOS:
 {data_str}
