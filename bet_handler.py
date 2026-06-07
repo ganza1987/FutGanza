@@ -27,7 +27,7 @@ def parse_bet(text: str) -> dict | None:
     Returns dict or None if invalid.
     """
     text = text.replace("/apuesta", "").strip()
-    parts = [p.strip() for p in re.split(r"[·|,]", text) if p.strip()]
+    parts = [p.strip() for p in re.split(r"[·|,;]", text) if p.strip()]
     if len(parts) < 2:
         return None
 
@@ -69,8 +69,8 @@ async def handle_bet_command(chat_id, text: str, send_fn) -> bool:
         if not bet:
             await send_fn(chat_id,
                 "❌ Formato incorrecto. Usa:\n"
-                "`/apuesta Partido · Mercado · Cuota · Importe`\n\n"
-                "Ejemplo:\n`/apuesta Real Madrid vs Barça · +2.5 goles · 1.75 · 10`"
+                "`/apuesta Partido ; Mercado ; Cuota ; Importe`\n\n"
+                "Ejemplo:\n`/apuesta Real Madrid vs Barça ; +2.5 goles ; 1.75 ; 10`"
             )
             return True
         bet_id = add_bet(
@@ -80,8 +80,8 @@ async def handle_bet_command(chat_id, text: str, send_fn) -> bool:
             odds=bet["odds"],
             stake=bet["stake"],
         )
-        odds_str = f" · cuota {bet['odds']}" if bet["odds"] else ""
-        stake_str = f" · {bet['stake']}€" if bet["stake"] else ""
+        odds_str = f" ; cuota {bet['odds']}" if bet["odds"] else ""
+        stake_str = f" ; {bet['stake']}€" if bet["stake"] else ""
         await send_fn(chat_id,
             f"✅ *Apuesta registrada* (ID: {bet_id})\n\n"
             f"📌 {bet['match']}\n"
