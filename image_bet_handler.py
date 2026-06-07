@@ -40,20 +40,37 @@ async def extract_bet_from_image(image_bytes: bytes) -> dict | None:
 
     prompt = """Analiza esta captura de pantalla de una apuesta deportiva y extrae los datos en JSON.
 
+IMPORTANTE — Apuestas combinadas (dobles, triples, acumuladores):
+- Si hay múltiples selecciones, es una apuesta combinada
+- El campo "match" debe listar TODOS los partidos separados por " | "
+- El campo "market" debe listar TODOS los mercados separados por " | "
+- La cuota final es el PRODUCTO de todas las cuotas individuales (excluyendo las que son "Push" o anuladas)
+- Si una selección es "Push" o "Void/Anulada", su cuota se trata como 1.0 (no multiplica)
+- El resultado general es "won" solo si TODAS las selecciones ganaron (las Push cuentan como ganadas)
+- Si alguna selección perdió, el resultado es "lost"
+- El beneficio neto = (stake × cuota_final) - stake
+
 Devuelve SOLO un objeto JSON válido con estos campos (usa null si no encuentras el dato):
 {
-  "match": "Equipo A vs Equipo B",
-  "market": "descripción del mercado (ej: +2.5 goles, resultado 1X2, BTTS...)",
+  "match": "Partido 1 | Partido 2 | ...",
+  "market": "Mercado 1 | Mercado 2 | ...",
   "odds": 1.75,
   "stake": 10.0,
   "result": "won" o "lost" o "void" o "pending",
   "profit": 8.75,
+  "is_combined": true o false,
+  "selections": [
+    {"match": "Equipo A vs Equipo B", "market": "descripción", "odds": 1.425, "result": "won"},
+    {"match": "Equipo C vs Equipo D", "market": "descripción", "odds": 1.30, "result": "void"}
+  ],
   "confidence": "high" o "medium" o "low"
 }
 
 Reglas:
-- result: "won" si ganó, "lost" si perdió, "void" si fue anulada, "pending" si no hay resultado aún
-- profit: beneficio neto (positivo si ganó, negativo si perdió, 0 si void)
+- result: "won" si ganó, "lost" si perdió, "void" si fue anulada/push total, "pending" si no hay resultado
+- Para combinadas: result es "won" si todas las selecciones ganaron o fueron push
+- profit: beneficio neto real = (stake × cuota_combinada_real) - stake
+- cuota_combinada_real: multiplica solo las cuotas de selecciones ganadas (push = 1.0)
 - Si no ves claramente un dato, ponlo como null
 - Devuelve SOLO el JSON, sin texto adicional"""
 
@@ -166,12 +183,24 @@ async def process_bet_screenshot(chat_id, file_id: str, caption: str | None, sen
         sign = "+" if profit >= 0 else ""
         profit_str = f"\n💰 Beneficio: *{sign}{round(profit, 2)}€*"
 
+    # Show selections for combined bets
+    selections_str = ""
+    if bet_data.get("is_combined") and bet_data.get("selections"):
+        lines = []
+        for s in bet_data["selections"]:
+            r_emoji = {"won": "✅", "lost": "❌", "void": "➖", "pending": "⏳"}.get(s.get("result", ""), "❓")
+            lines.append(f"  {r_emoji} {s.get('match', '?')} — {s.get('market', '?')} @{s.get('odds', '?')}")
+        selections_str = "\n" + "\n".join(lines)
+
+    bet_type = "🎰 *Combinada*" if bet_data.get("is_combined") else "🎯"
+
     await send_fn(chat_id,
         f"✅ *Apuesta registrada* (ID: {bet_id})\n\n"
-        f"📌 {match}\n"
-        f"🎯 {market}"
+        f"{bet_type} {match}\n"
+        f"Mercado: {market}"
         f"{f' · cuota {odds}' if odds else ''}"
-        f"{f' · {stake}€' if stake else ''}\n"
+        f"{f' · {stake}€' if stake else ''}"
+        f"{selections_str}\n"
         f"📊 {result_emoji}{profit_str}\n\n"
         f"_Confianza de lectura: {confidence}_"
     )
