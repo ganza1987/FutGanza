@@ -5,12 +5,13 @@ import httpx
 
 from analyzer import analyze_match
 from bet_handler import handle_bet_command
+from image_bet_handler import process_bet_screenshot
 
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL", "")
 
 VS_PATTERN = re.compile(
     r"^(.+?)\s+(?:vs\.?|versus|contra|-)\s+(.+)$",
@@ -56,11 +57,23 @@ async def handle_update(data: dict):
         return
 
     chat_id = message["chat"]["id"]
+
+    # ── Handle photo messages ──────────────────────────────────────────────────
+    if message.get("photo"):
+        # Get highest resolution photo
+        photo = message["photo"][-1]
+        file_id = photo["file_id"]
+        caption = message.get("caption", "")
+        await send_typing(chat_id)
+        await process_bet_screenshot(chat_id, file_id, caption, send_message)
+        return
+
+    # ── Handle text messages ───────────────────────────────────────────────────
     text = message.get("text", "").strip()
     if not text:
         return
 
-    # /start o /help
+    # /start or /help
     if text.startswith("/start") or text.startswith("/help"):
         await send_message(chat_id, HELP_TEXT)
         return
@@ -90,7 +103,8 @@ async def handle_update(data: dict):
         chat_id,
         "No reconozco ese formato.\n"
         "Escribe el partido así: `Real Madrid vs Barcelona`\n"
-        "O usa /help para ver todos los comandos."
+        "O envía una *captura de tu apuesta* para registrarla automáticamente.\n"
+        "Usa /help para ver todos los comandos."
     )
 
 
@@ -100,18 +114,19 @@ HELP_TEXT = """
 *Análisis de partidos:*
 Escribe el partido: `Real Madrid vs Barcelona`
 
-*Apuestas:*
-/apuesta Partido ; Mercado ; Cuota ; Importe
+*Registrar apuesta:*
+📸 Envía una captura de tu apuesta y la registro automáticamente
+
+O manualmente:
+`/apuesta Partido ; Mercado ; Cuota ; Importe`
 _Ejemplo: /apuesta España vs Francia ; +2.5 goles ; 1.80 ; 10_
 
+*Gestionar apuestas:*
 /resultado <id> ganó|perdió|nula
-_Ejemplo: /resultado 3 ganó_
-
 /apuestas — últimas 10 apuestas
 /apuestas pendientes — solo pendientes
 /stats — tus estadísticas completas
 /web — enlace al dashboard web
 
-*Info:*
 /help — esta ayuda
 """.strip()
