@@ -318,6 +318,20 @@ async def build_real_data(home_name: str, away_name: str) -> dict:
     api_ok = home_data is not None or away_data is not None
     source_str = " + ".join(set(sources)) if sources else "Búsqueda web"
 
+    # Confidence level based on data quality
+    both_found = home_data is not None and away_data is not None
+    has_results = (
+        bool(home_data and (home_data.get("home", {}).get("results") or home_data.get("away", {}).get("results"))) and
+        bool(away_data and (away_data.get("home", {}).get("results") or away_data.get("away", {}).get("results")))
+    )
+
+    if both_found and has_results and sources:
+        confidence = "high"    # Both teams found in APIs with real match data
+    elif api_ok and has_results:
+        confidence = "medium"  # One team found or partial data
+    else:
+        confidence = "low"     # No API data, falling back to web search
+
     return {
         "home_team": home_team_info,
         "away_team": away_team_info,
@@ -326,6 +340,7 @@ async def build_real_data(home_name: str, away_name: str) -> dict:
         "h2h": h2h,
         "api_ok": api_ok,
         "source": source_str,
+        "confidence": confidence,
     }
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
@@ -395,6 +410,7 @@ def build_prompt(home: str, away: str, conditions: list[dict], data: dict) -> st
 
     data_str = "\n".join(blocks)
 
+    confidence = data.get("confidence", "low")
     web_instruction = "" if data["api_ok"] else f"""
 Sin datos en APIs. Usa web_search:
 1. "sofascore {home} resultados 2026"
@@ -402,12 +418,24 @@ Sin datos en APIs. Usa web_search:
 3. "{home} {away} head to head"
 """
 
+    # Confidence banner
+    if confidence == "high":
+        confidence_banner = ""
+        confidence_footer = f"📡 _{data.get('source', 'API-Football')} · {now}_"
+    elif confidence == "medium":
+        confidence_banner = "⚠️ DATOS PARCIALES: solo un equipo encontrado en APIs. Evalúa condiciones con cautela.\n\n"
+        confidence_footer = f"⚠️ _Datos parciales · {data.get('source', '')} · {now}_"
+    else:
+        confidence_banner = "⚠️ DATOS NO VERIFICADOS: liga no cubierta por APIs. Análisis basado en búsqueda web — tómalo con precaución.\n\n"
+        confidence_footer = f"⚠️ _Datos no verificados · Búsqueda web · {now}_"
+
     cond_list = "\n".join(f'• {c["label"]} (peso {c["weight"]})' for c in conditions)
 
     return f"""Analista deportivo. Análisis BREVE para Telegram. Máximo 1800 caracteres.
 
 REGLA CRÍTICA: USA SOLO los datos proporcionados. NUNCA inventes porcentajes ni promedios.
 Si no tienes un dato, no lo menciones.
+Nivel de confianza de los datos: {confidence.upper()}
 
 {web_instruction}
 DATOS:
@@ -418,7 +446,7 @@ CONDICIONES A EVALUAR:
 
 FORMATO EXACTO:
 
-⚽ *{home.upper()} vs {away.upper()}*
+{confidence_banner}⚽ *{home.upper()} vs {away.upper()}*
 _[competición] · {now}_
 
 🔵 *{home}* · [✅❌🟡 x5 casa en una línea]
@@ -437,7 +465,7 @@ Goles fuera: X marc / X enc | Córners: X | Disparos: X | Tarj: X _(omite si no 
 🟢 FAVORABLE / 🟡 DUDOSO / 🔴 NO RECOMENDABLE
 
 🔮 [1 frase conclusión]
-📡 _{data.get("source", "API-Football")} · {now}_"""
+{confidence_footer}"""
 
 
 async def analyze_match(home: str, away: str, conditions: list[dict] | None = None) -> str:
