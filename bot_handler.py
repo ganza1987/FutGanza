@@ -88,6 +88,16 @@ async def handle_update(data: dict):
         await send_daily_asian_analysis()
         return
 
+    # /america — trigger daily American analysis manually
+    if text.startswith("/america"):
+        await send_message(chat_id,
+            "🌎 Lanzando análisis de ligas americanas...\n"
+            "_Esto puede tardar varios minutos según los partidos del día._"
+        )
+        from scheduler import send_daily_american_analysis
+        await send_daily_american_analysis()
+        return
+
     # Bet commands
     handled = await handle_bet_command(chat_id, text, send_message)
     if handled:
@@ -140,4 +150,5 @@ _Ejemplo: /apuesta España vs Francia ; +2.5 goles ; 1.80 ; 10_
 
 /help — esta ayuda
 /asian — análisis de todos los partidos asiáticos de hoy
+/america — análisis de todos los partidos americanos de hoy
 """.strip()
