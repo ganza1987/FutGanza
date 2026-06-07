@@ -5,22 +5,24 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-APIFOOTBALL_KEY   = os.getenv("APIFOOTBALL_KEY", "888285a75737af52283245495c97c67a")
-ANTHROPIC_URL     = "https://api.anthropic.com/v1/messages"
-APIFOOTBALL_URL   = "https://v3.football.api-sports.io"
+ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
+APIFOOTBALL_KEY    = os.getenv("APIFOOTBALL_KEY", "888285a75737af52283245495c97c67a")
+HIGHLIGHTLY_KEY    = os.getenv("HIGHLIGHTLY_KEY", "5d807f42-7832-40e7-9b0c-50d05280742f")
+ANTHROPIC_URL      = "https://api.anthropic.com/v1/messages"
+APIFOOTBALL_URL    = "https://v3.football.api-sports.io"
+HIGHLIGHTLY_URL    = "https://api.highlightly.net/v1"
 
 DEFAULT_CONDITIONS = [
-    {"id": "btts",         "label": "Ambos equipos marcan (BTTS)",                 "weight": 8},
-    {"id": "over25",       "label": "Más de 2.5 goles en el partido",               "weight": 7},
-    {"id": "home_form",    "label": "El local tiene mejor forma reciente",          "weight": 6},
-    {"id": "away_goals",   "label": "Visitante promedia más de 1.5 goles/partido",  "weight": 5},
-    {"id": "clean_sheet",  "label": "Al menos un equipo con portería a 0 últimos 3","weight": 4},
-    {"id": "home_unbeaten","label": "Local invicto en sus últimos 5",               "weight": 6},
-    {"id": "h2h_goals",    "label": "H2H: ambos equipos marcan",                   "weight": 5},
-    {"id": "over15",       "label": "Más de 1.5 goles en el partido",               "weight": 5},
-    {"id": "home_goals",   "label": "Local promedia más de 1.5 goles en casa",      "weight": 5},
-    {"id": "away_concede", "label": "Visitante encaja en todos sus partidos fuera", "weight": 4},
+    {"id": "btts",         "label": "Ambos equipos marcan (BTTS)",                  "weight": 8},
+    {"id": "over25",       "label": "Más de 2.5 goles en el partido",                "weight": 7},
+    {"id": "home_form",    "label": "El local tiene mejor forma reciente",           "weight": 6},
+    {"id": "away_goals",   "label": "Visitante promedia más de 1.5 goles/partido",   "weight": 5},
+    {"id": "clean_sheet",  "label": "Al menos un equipo con portería a 0 últimos 3", "weight": 4},
+    {"id": "home_unbeaten","label": "Local invicto en sus últimos 5",                "weight": 6},
+    {"id": "h2h_goals",    "label": "H2H: ambos equipos marcan",                    "weight": 5},
+    {"id": "over15",       "label": "Más de 1.5 goles en el partido",                "weight": 5},
+    {"id": "home_goals",   "label": "Local promedia más de 1.5 goles en casa",       "weight": 5},
+    {"id": "away_concede", "label": "Visitante encaja en todos sus partidos fuera",  "weight": 4},
 ]
 
 # ── API-Football ──────────────────────────────────────────────────────────────
@@ -35,7 +37,7 @@ async def apif(endpoint: str, params: dict) -> dict:
         r.raise_for_status()
         return r.json()
 
-async def find_team(name: str) -> dict | None:
+async def apif_find_team(name: str) -> dict | None:
     try:
         data = await apif("teams", {"search": name})
         results = data.get("response", [])
@@ -46,29 +48,89 @@ async def find_team(name: str) -> dict | None:
                 return r
         return results[0]
     except Exception as e:
-        logger.warning(f"find_team({name}): {e}")
+        logger.warning(f"apif_find_team({name}): {e}")
         return None
 
-async def get_fixtures(team_id: int, last: int = 12) -> list:
+async def apif_get_fixtures(team_id: int, last: int = 12) -> list:
     try:
         data = await apif("fixtures", {"team": team_id, "last": last})
         return data.get("response", [])
     except Exception as e:
-        logger.warning(f"get_fixtures: {e}")
+        logger.warning(f"apif_get_fixtures: {e}")
         return []
 
-async def get_h2h(id1: int, id2: int) -> list:
+async def apif_get_h2h(id1: int, id2: int) -> list:
     try:
         data = await apif("fixtures/headtohead", {"h2h": f"{id1}-{id2}", "last": 6})
         return data.get("response", [])
     except Exception as e:
         return []
 
+async def apif_get_fixture_stats(fixture_id: int) -> list:
+    try:
+        data = await apif("fixtures/statistics", {"fixture": fixture_id})
+        return data.get("response", [])
+    except Exception as e:
+        return []
+
+def sv(stats, team_id, name):
+    for t in stats:
+        if t.get("team", {}).get("id") == team_id:
+            for s in t.get("statistics", []):
+                if s["type"] == name:
+                    v = s["value"]
+                    return int(v) if v is not None else None
+    return None
+
+# ── Highlightly ───────────────────────────────────────────────────────────────
+
+async def hl(endpoint: str, params: dict) -> dict:
+    headers = {"x-api-key": HIGHLIGHTLY_KEY}
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(f"{HIGHLIGHTLY_URL}/{endpoint}", headers=headers, params=params)
+        r.raise_for_status()
+        return r.json()
+
+async def hl_find_team(name: str) -> dict | None:
+    try:
+        data = await hl("teams", {"search": name})
+        results = data.get("data", data.get("teams", data.get("response", [])))
+        if not results:
+            return None
+        for r in results:
+            tname = r.get("name", r.get("team", {}).get("name", ""))
+            if name.lower() in tname.lower():
+                return r
+        return results[0]
+    except Exception as e:
+        logger.warning(f"hl_find_team({name}): {e}")
+        return None
+
+async def hl_get_fixtures(team_id, last: int = 10) -> list:
+    try:
+        data = await hl("fixtures", {"team": team_id, "last": last})
+        return data.get("data", data.get("fixtures", data.get("response", [])))
+    except Exception as e:
+        logger.warning(f"hl_get_fixtures: {e}")
+        return []
+
+async def hl_get_h2h(id1, id2, last: int = 5) -> list:
+    try:
+        data = await hl("fixtures/headtohead", {"h2h": f"{id1}-{id2}", "last": last})
+        return data.get("data", data.get("fixtures", data.get("response", [])))
+    except Exception as e:
+        return []
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def avg(vals):
     v = [x for x in vals if x is not None]
     return round(sum(v)/len(v), 1) if v else None
 
-def get_result(fix: dict, team_id: int) -> str:
+def nd(val):
+    return str(val) if val is not None else None
+
+def get_result_apif(fix: dict, team_id: int) -> str:
     gh = fix["goals"]["home"] or 0
     ga = fix["goals"]["away"] or 0
     is_home = fix["teams"]["home"]["id"] == team_id
@@ -76,63 +138,197 @@ def get_result(fix: dict, team_id: int) -> str:
     gc = ga if is_home else gh
     return "W" if gf > gc else "D" if gf == gc else "L"
 
-def fmt_result(fix: dict, team_id: int) -> str:
+def fmt_result_apif(fix: dict, team_id: int) -> str:
     if fix["goals"]["home"] is None:
-        return "?"
-    r = get_result(fix, team_id)
+        return None
+    r = get_result_apif(fix, team_id)
     is_home = fix["teams"]["home"]["id"] == team_id
     gh = fix["goals"]["home"]
     ga = fix["goals"]["away"]
     opp = fix["teams"]["away"]["name"] if is_home else fix["teams"]["home"]["name"]
     emoji = "✅" if r == "W" else "🟡" if r == "D" else "❌"
-    return f"{emoji}{gh}-{ga}{opp[:6]}"
+    return f"{emoji}{gh}-{ga} {opp[:7]}"
 
-async def team_data(team_id: int) -> dict:
-    fixes = await get_fixtures(team_id, 12)
+# ── API-Football team data ────────────────────────────────────────────────────
+
+async def apif_team_data(team_id: int) -> dict:
+    fixes = await apif_get_fixtures(team_id, 12)
     home_fixes = [f for f in fixes if f["teams"]["home"]["id"] == team_id and f["goals"]["home"] is not None]
     away_fixes = [f for f in fixes if f["teams"]["away"]["id"] == team_id and f["goals"]["home"] is not None]
 
-    def calc(fix_list):
+    async def calc(fix_list, loc):
         gf_l, ga_l = [], []
-        results = []
+        corners_l, shots_l, cards_l = [], [], []
+        results_fmt = []
         for fix in fix_list[:6]:
             is_h = fix["teams"]["home"]["id"] == team_id
             gh = fix["goals"]["home"] or 0
             ga = fix["goals"]["away"] or 0
             gf_l.append(gh if is_h else ga)
             ga_l.append(ga if is_h else gh)
-            results.append(get_result(fix, team_id))
+            fmt = fmt_result_apif(fix, team_id)
+            if fmt:
+                results_fmt.append(fmt)
+            # Try to get stats
+            stats = await apif_get_fixture_stats(fix["fixture"]["id"])
+            if stats:
+                h_id = fix["teams"]["home"]["id"]
+                a_id = fix["teams"]["away"]["id"]
+                c = sv(stats, h_id if is_h else a_id, "Corner Kicks")
+                s = sv(stats, h_id if is_h else a_id, "Shots on Goal")
+                yh = sv(stats, h_id, "Yellow Cards") or 0
+                ya = sv(stats, a_id, "Yellow Cards") or 0
+                rh = sv(stats, h_id, "Red Cards") or 0
+                ra = sv(stats, a_id, "Red Cards") or 0
+                if c is not None: corners_l.append(c)
+                if s is not None: shots_l.append(s)
+                cards_l.append(yh + ya + rh + ra)
         return {
-            "form": "".join(results[:5]),
+            "results": results_fmt[:5],
             "gf": avg(gf_l), "ga": avg(ga_l),
+            "corners": avg(corners_l),
+            "shots": avg(shots_l),
+            "cards": avg(cards_l),
             "fixes": fix_list[:5],
-            "gf_list": gf_l, "ga_list": ga_l,
         }
 
     return {
-        "home": calc(home_fixes),
-        "away": calc(away_fixes),
+        "home": await calc(home_fixes, "home"),
+        "away": await calc(away_fixes, "away"),
+        "source": "API-Football",
     }
 
+# ── Highlightly team data ─────────────────────────────────────────────────────
+
+async def hl_team_data(team_id) -> dict:
+    """Extract basic stats from Highlightly fixtures."""
+    fixes = await hl_get_fixtures(team_id, 10)
+    home_fixes, away_fixes = [], []
+
+    for f in fixes:
+        # Normalize Highlightly fixture structure
+        home_id = f.get("homeTeam", {}).get("id") or f.get("home", {}).get("id") or f.get("teams", {}).get("home", {}).get("id")
+        away_id = f.get("awayTeam", {}).get("id") or f.get("away", {}).get("id") or f.get("teams", {}).get("away", {}).get("id")
+        if str(home_id) == str(team_id):
+            home_fixes.append(f)
+        elif str(away_id) == str(team_id):
+            away_fixes.append(f)
+
+    def extract_goals(fix, is_home):
+        gh = fix.get("homeScore") or fix.get("score", {}).get("home") or fix.get("goals", {}).get("home")
+        ga = fix.get("awayScore") or fix.get("score", {}).get("away") or fix.get("goals", {}).get("away")
+        if gh is None or ga is None:
+            return None, None
+        return (int(gh), int(ga))
+
+    def calc(fix_list, is_home_list):
+        gf_l, ga_l = [], []
+        results_fmt = []
+        for fix, is_home in zip(fix_list[:5], is_home_list[:5]):
+            gh, ga = extract_goals(fix, is_home)
+            if gh is None:
+                continue
+            gf = gh if is_home else ga
+            gc = ga if is_home else gh
+            gf_l.append(gf)
+            ga_l.append(gc)
+            r = "W" if gf > gc else "D" if gf == gc else "L"
+            emoji = "✅" if r == "W" else "🟡" if r == "D" else "❌"
+            home_name = fix.get("homeTeam", {}).get("name", fix.get("home", {}).get("name", "?"))[:7]
+            away_name = fix.get("awayTeam", {}).get("name", fix.get("away", {}).get("name", "?"))[:7]
+            opp = away_name if is_home else home_name
+            results_fmt.append(f"{emoji}{gh}-{ga} {opp}")
+        return {
+            "results": results_fmt,
+            "gf": avg(gf_l), "ga": avg(ga_l),
+            "corners": None, "shots": None, "cards": None,
+            "fixes": fix_list[:5],
+        }
+
+    return {
+        "home": calc(home_fixes, [True]*len(home_fixes)),
+        "away": calc(away_fixes, [False]*len(away_fixes)),
+        "source": "Highlightly",
+    }
+
+# ── Main data builder ─────────────────────────────────────────────────────────
+
 async def build_real_data(home_name: str, away_name: str) -> dict:
-    ht = await find_team(home_name)
-    at = await find_team(away_name)
-    api_ok = ht is not None or at is not None
+    # 1. Try API-Football first
+    ht_apif = await apif_find_team(home_name)
+    at_apif = await apif_find_team(away_name)
 
-    result = {"home_team": ht, "away_team": at, "api_ok": api_ok,
-              "home_data": None, "away_data": None, "h2h": []}
+    home_data, away_data = None, None
+    home_team_info, away_team_info = None, None
+    h2h = []
+    sources = []
 
-    if ht:
-        result["home_data"] = await team_data(ht["team"]["id"])
-    if at:
-        result["away_data"] = await team_data(at["team"]["id"])
-    if ht and at:
-        result["h2h"] = await get_h2h(ht["team"]["id"], at["team"]["id"])
+    if ht_apif:
+        home_data = await apif_team_data(ht_apif["team"]["id"])
+        home_team_info = ht_apif
+        sources.append("API-Football")
 
-    return result
+    if at_apif:
+        away_data = await apif_team_data(at_apif["team"]["id"])
+        away_team_info = at_apif
 
-def nd(val):
-    return str(val) if val is not None else "s/d"
+    if ht_apif and at_apif:
+        h2h = await apif_get_h2h(ht_apif["team"]["id"], at_apif["team"]["id"])
+
+    # 2. If API-Football has no stats for corners/shots, try Highlightly
+    home_needs_hl = not home_data or (home_data["home"]["corners"] is None and home_data["away"]["corners"] is None)
+    away_needs_hl = not away_data or (away_data["home"]["corners"] is None and away_data["away"]["corners"] is None)
+
+    if home_needs_hl:
+        ht_hl = await hl_find_team(home_name)
+        if ht_hl:
+            hl_data = await hl_team_data(ht_hl.get("id") or ht_hl.get("team", {}).get("id"))
+            if home_data:
+                # Merge: keep API-Football results but fill missing stats from Highlightly
+                for loc in ["home", "away"]:
+                    if home_data[loc]["corners"] is None:
+                        home_data[loc]["corners"] = hl_data[loc].get("corners")
+                    if home_data[loc]["shots"] is None:
+                        home_data[loc]["shots"] = hl_data[loc].get("shots")
+                    if home_data[loc]["cards"] is None:
+                        home_data[loc]["cards"] = hl_data[loc].get("cards")
+                home_data["source"] = "API-Football + Highlightly"
+            else:
+                home_data = hl_data
+                home_team_info = ht_hl
+            sources.append("Highlightly")
+
+    if away_needs_hl:
+        at_hl = await hl_find_team(away_name)
+        if at_hl:
+            hl_data = await hl_team_data(at_hl.get("id") or at_hl.get("team", {}).get("id"))
+            if away_data:
+                for loc in ["home", "away"]:
+                    if away_data[loc]["corners"] is None:
+                        away_data[loc]["corners"] = hl_data[loc].get("corners")
+                    if away_data[loc]["shots"] is None:
+                        away_data[loc]["shots"] = hl_data[loc].get("shots")
+                    if away_data[loc]["cards"] is None:
+                        away_data[loc]["cards"] = hl_data[loc].get("cards")
+                away_data["source"] = "API-Football + Highlightly"
+            else:
+                away_data = hl_data
+                away_team_info = at_hl
+
+    api_ok = home_data is not None or away_data is not None
+    source_str = " + ".join(set(sources)) if sources else "Búsqueda web"
+
+    return {
+        "home_team": home_team_info,
+        "away_team": away_team_info,
+        "home_data": home_data,
+        "away_data": away_data,
+        "h2h": h2h,
+        "api_ok": api_ok,
+        "source": source_str,
+    }
+
+# ── Prompt builder ────────────────────────────────────────────────────────────
 
 def build_prompt(home: str, away: str, conditions: list[dict], data: dict) -> str:
     now = datetime.now().strftime("%d/%m/%Y")
@@ -142,29 +338,49 @@ def build_prompt(home: str, away: str, conditions: list[dict], data: dict) -> st
 
     blocks = [f"=== DATOS REALES ({now}) ===\n"]
 
-    if data.get("home_data"):
-        hn = data["home_team"]["team"]["name"]
-        home_res = " ".join([fmt_result(f, data["home_team"]["team"]["id"]) for f in hd["home"]["fixes"]])
-        away_res = " ".join([fmt_result(f, data["home_team"]["team"]["id"]) for f in hd["away"]["fixes"]])
-        blocks.append(
-            f"🔵 {hn.upper()}\n"
-            f"  Casa: {home_res} | Media goles: {nd(hd['home']['gf'])} marc / {nd(hd['home']['ga'])} enc\n"
-            f"  Fuera: {away_res} | Media goles: {nd(hd['away']['gf'])} marc / {nd(hd['away']['ga'])} enc"
-        )
-    else:
-        blocks.append(f"🔵 {home.upper()} — No encontrado en API-Football")
+    def team_block(team_info, td, name, role):
+        if not td:
+            return f"{'🔵' if role=='home' else '🔴'} {name.upper()} — Sin datos disponibles"
+        tname = name
+        if team_info:
+            tname = team_info.get("team", {}).get("name") or team_info.get("name") or name
 
-    if data.get("away_data"):
-        an = data["away_team"]["team"]["name"]
-        home_res = " ".join([fmt_result(f, data["away_team"]["team"]["id"]) for f in ad["home"]["fixes"]])
-        away_res = " ".join([fmt_result(f, data["away_team"]["team"]["id"]) for f in ad["away"]["fixes"]])
-        blocks.append(
-            f"\n🔴 {an.upper()}\n"
-            f"  Fuera: {away_res} | Media goles: {nd(ad['away']['gf'])} marc / {nd(ad['away']['ga'])} enc\n"
-            f"  Casa: {home_res} | Media goles: {nd(ad['home']['gf'])} marc / {nd(ad['home']['ga'])} enc"
+        loc_data  = td.get("home" if role=="home" else "away", {})
+        away_data = td.get("away" if role=="home" else "home", {})
+
+        res_str = " ".join(loc_data.get("results", [])) or "sin datos"
+        gf = nd(loc_data.get("gf"))
+        ga = nd(loc_data.get("ga"))
+
+        extras = []
+        if loc_data.get("corners") is not None:
+            extras.append(f"Córners: {loc_data['corners']}")
+        if loc_data.get("shots") is not None:
+            extras.append(f"Disparos: {loc_data['shots']}")
+        if loc_data.get("cards") is not None:
+            extras.append(f"Tarjetas: {loc_data['cards']}")
+        extras_str = " | " + " | ".join(extras) if extras else ""
+
+        away_gf = nd(away_data.get("gf"))
+        away_ga = nd(away_data.get("ga"))
+        away_res = " ".join(away_data.get("results", [])) or "sin datos"
+
+        emoji = "🔵" if role == "home" else "🔴"
+        loc_label = "En casa" if role == "home" else "De visitante"
+        away_label = "De visitante" if role == "home" else "En casa"
+
+        src = td.get("source", "")
+        src_note = f" _[{src}]_" if src else ""
+
+        return (
+            f"{emoji} *{tname}*{src_note}\n"
+            f"  {loc_label}: {res_str}\n"
+            f"  Media goles: {gf} marc / {ga} enc{extras_str}\n"
+            f"  {away_label}: {away_res} | Media: {away_gf} marc / {away_ga} enc"
         )
-    else:
-        blocks.append(f"\n🔴 {away.upper()} — No encontrado en API-Football")
+
+    blocks.append(team_block(data.get("home_team"), hd, home, "home"))
+    blocks.append("\n" + team_block(data.get("away_team"), ad, away, "away"))
 
     if data.get("h2h"):
         h2h_lines = []
@@ -180,7 +396,7 @@ def build_prompt(home: str, away: str, conditions: list[dict], data: dict) -> st
     data_str = "\n".join(blocks)
 
     web_instruction = "" if data["api_ok"] else f"""
-API-Football no tiene datos. Usa web_search:
+Sin datos en APIs. Usa web_search:
 1. "sofascore {home} resultados 2026"
 2. "sofascore {away} resultados 2026"
 3. "{home} {away} head to head"
@@ -190,9 +406,8 @@ API-Football no tiene datos. Usa web_search:
 
     return f"""Analista deportivo. Análisis BREVE para Telegram. Máximo 1800 caracteres.
 
-REGLA CRÍTICA: USA SOLO los datos proporcionados partido a partido.
-NUNCA inventes ni calcules porcentajes o promedios que no estén en los datos.
-Si no tienes un dato concreto, no lo menciones.
+REGLA CRÍTICA: USA SOLO los datos proporcionados. NUNCA inventes porcentajes ni promedios.
+Si no tienes un dato, no lo menciones.
 
 {web_instruction}
 DATOS:
@@ -206,23 +421,23 @@ FORMATO EXACTO:
 ⚽ *{home.upper()} vs {away.upper()}*
 _[competición] · {now}_
 
-🔵 *{home}* · [✅❌🟡 x5 resultados casa en una línea]
-Goles casa: X marc / X enc de media
+🔵 *{home}* · [✅❌🟡 x5 casa en una línea]
+Goles casa: X marc / X enc | Córners: X | Disparos: X | Tarj: X _(omite si no hay dato)_
 
-🔴 *{away}* · [✅❌🟡 x5 resultados fuera en una línea]
-Goles fuera: X marc / X enc de media
+🔴 *{away}* · [✅❌🟡 x5 fuera en una línea]
+Goles fuera: X marc / X enc | Córners: X | Disparos: X | Tarj: X _(omite si no hay dato)_
 
 ⚔️ *H2H* · [últimos 3] · media goles: X
 
 ━━━━━━━━━━━━━━━━
 ✅ *Condiciones*
-[cada una en UNA línea: ✅/❌ Nombre — motivo breve basado SOLO en datos reales]
+[cada una en UNA línea: ✅/❌ Nombre — motivo basado SOLO en datos reales]
 
 📊 *X/{max_pts} pts · X%*
 🟢 FAVORABLE / 🟡 DUDOSO / 🔴 NO RECOMENDABLE
 
 🔮 [1 frase conclusión]
-📡 _{"API-Football" if data["api_ok"] else "Sofascore"} · {now}_"""
+📡 _{data.get("source", "API-Football")} · {now}_"""
 
 
 async def analyze_match(home: str, away: str, conditions: list[dict] | None = None) -> str:
@@ -230,7 +445,7 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
         conditions = DEFAULT_CONDITIONS
 
     data = await build_real_data(home, away)
-    logger.info(f"API-Football ok={data['api_ok']} for {home} vs {away}")
+    logger.info(f"Sources: {data['source']} for {home} vs {away}")
 
     prompt = build_prompt(home, away, conditions, data)
 
@@ -243,7 +458,7 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
     body = {
         "model": "claude-sonnet-4-6",
         "max_tokens": 3000,
-        "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+        "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 4}],
         "messages": [{"role": "user", "content": prompt}],
         "system": (
             "Eres un analista deportivo experto en fútbol. Respondes siempre en español. "
