@@ -101,8 +101,8 @@ HELP_TEXT = """
 Escribe el partido: `Real Madrid vs Barcelona`
 
 *Apuestas:*
-/apuesta Partido · Mercado · Cuota · Importe
-_Ejemplo: /apuesta España vs Francia · +2.5 goles · 1.80 · 10_
+/apuesta Partido ; Mercado ; Cuota ; Importe
+_Ejemplo: /apuesta España vs Francia ; +2.5 goles ; 1.80 ; 10_
 
 /resultado <id> ganó|perdió|nula
 _Ejemplo: /resultado 3 ganó_
