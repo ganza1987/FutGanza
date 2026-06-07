@@ -1,119 +1,224 @@
 """
-Simple SQLite database for bet tracking.
+PostgreSQL database for bet tracking.
+Uses psycopg2 for persistent storage on Render.
 """
-import sqlite3
 import os
-from datetime import datetime
-from pathlib import Path
+import logging
 
-DB_PATH = os.getenv("DB_PATH", "/tmp/futganza.db")
+logger = logging.getLogger(__name__)
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://futganza_db_user:Cx9MjEUwzUP1F95jvQcPhC2X5WTaTq5h@dpg-d8iq5ob7uimc73b2mlig-a/futganza_db"
+)
+
+try:
+    import psycopg2
+    import psycopg2.extras
+    DB_TYPE = "postgres"
+except ImportError:
+    import sqlite3
+    DB_TYPE = "sqlite"
+    logger.warning("psycopg2 not available, falling back to SQLite")
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    if DB_TYPE == "postgres":
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    else:
+        conn = sqlite3.connect("/tmp/futganza.db")
+        conn.row_factory = sqlite3.Row
+        return conn
 
 
 def init_db():
     conn = get_conn()
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS bets (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id     TEXT NOT NULL,
-        match       TEXT NOT NULL,
-        match_date  TEXT,
-        market      TEXT NOT NULL,
-        odds        REAL,
-        stake       REAL,
-        result      TEXT DEFAULT 'pending',  -- pending / won / lost / void
-        profit      REAL,
-        analysis_id TEXT,
-        created_at  TEXT DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS analyses (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id    TEXT NOT NULL,
-        match      TEXT NOT NULL,
-        home       TEXT NOT NULL,
-        away       TEXT NOT NULL,
-        score      INTEGER,
-        max_score  INTEGER,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
-    """)
+    cur = conn.cursor()
+    if DB_TYPE == "postgres":
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bets (
+                id          SERIAL PRIMARY KEY,
+                chat_id     TEXT NOT NULL,
+                match       TEXT NOT NULL,
+                match_date  TEXT,
+                market      TEXT NOT NULL,
+                odds        REAL,
+                stake       REAL,
+                result      TEXT DEFAULT 'pending',
+                profit      REAL,
+                analysis_id TEXT,
+                created_at  TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS analyses (
+                id         SERIAL PRIMARY KEY,
+                chat_id    TEXT NOT NULL,
+                match      TEXT NOT NULL,
+                home       TEXT NOT NULL,
+                away       TEXT NOT NULL,
+                score      INTEGER,
+                max_score  INTEGER,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+    else:
+        cur.executescript("""
+            CREATE TABLE IF NOT EXISTS bets (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id     TEXT NOT NULL,
+                match       TEXT NOT NULL,
+                match_date  TEXT,
+                market      TEXT NOT NULL,
+                odds        REAL,
+                stake       REAL,
+                result      TEXT DEFAULT 'pending',
+                profit      REAL,
+                analysis_id TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS analyses (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id    TEXT NOT NULL,
+                match      TEXT NOT NULL,
+                home       TEXT NOT NULL,
+                away       TEXT NOT NULL,
+                score      INTEGER,
+                max_score  INTEGER,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+        """)
     conn.commit()
+    cur.close()
     conn.close()
+
+
+def _fetchall(cur, query, params=()):
+    cur.execute(query, params)
+    if DB_TYPE == "postgres":
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    else:
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _fetchone(cur, query, params=()):
+    cur.execute(query, params)
+    if DB_TYPE == "postgres":
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+    else:
+        row = cur.fetchone()
+        return dict(row) if row else None
 
 
 # ── Bets ──────────────────────────────────────────────────────────────────────
 
 def add_bet(chat_id, match, market, odds=None, stake=None, match_date=None, analysis_id=None) -> int:
     conn = get_conn()
-    cur = conn.execute(
-        "INSERT INTO bets (chat_id, match, match_date, market, odds, stake, analysis_id) VALUES (?,?,?,?,?,?,?)",
-        (str(chat_id), match, match_date, market, odds, stake, analysis_id)
-    )
-    bet_id = cur.lastrowid
+    cur = conn.cursor()
+    if DB_TYPE == "postgres":
+        cur.execute(
+            "INSERT INTO bets (chat_id, match, match_date, market, odds, stake, analysis_id) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (str(chat_id), match, match_date, market, odds, stake, analysis_id)
+        )
+        bet_id = cur.fetchone()[0]
+    else:
+        cur.execute(
+            "INSERT INTO bets (chat_id, match, match_date, market, odds, stake, analysis_id) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (str(chat_id), match, match_date, market, odds, stake, analysis_id)
+        )
+        bet_id = cur.lastrowid
     conn.commit()
+    cur.close()
     conn.close()
     return bet_id
 
 
 def update_bet_result(bet_id: int, result: str):
-    """result: won / lost / void"""
     conn = get_conn()
-    bet = conn.execute("SELECT odds, stake FROM bets WHERE id=?", (bet_id,)).fetchone()
+    cur = conn.cursor()
+    if DB_TYPE == "postgres":
+        cur.execute("SELECT odds, stake FROM bets WHERE id=%s", (bet_id,))
+        row = cur.fetchone()
+    else:
+        cur.execute("SELECT odds, stake FROM bets WHERE id=?", (bet_id,))
+        row = cur.fetchone()
+
     profit = None
-    if bet and bet["stake"]:
-        if result == "won":
-            profit = round(bet["stake"] * (bet["odds"] - 1), 2) if bet["odds"] else bet["stake"]
-        elif result == "lost":
-            profit = -bet["stake"]
-        elif result == "void":
-            profit = 0.0
-    conn.execute(
-        "UPDATE bets SET result=?, profit=? WHERE id=?",
-        (result, profit, bet_id)
-    )
+    if row:
+        odds_val = row[0]
+        stake_val = row[1]
+        if stake_val:
+            if result == "won":
+                profit = round(stake_val * (odds_val - 1), 2) if odds_val else stake_val
+            elif result == "lost":
+                profit = -stake_val
+            elif result == "void":
+                profit = 0.0
+
+    if DB_TYPE == "postgres":
+        cur.execute("UPDATE bets SET result=%s, profit=%s WHERE id=%s", (result, profit, bet_id))
+    else:
+        cur.execute("UPDATE bets SET result=?, profit=? WHERE id=?", (result, profit, bet_id))
+
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def get_bets(chat_id, limit=50, result_filter=None):
     conn = get_conn()
-    if result_filter:
-        rows = conn.execute(
-            "SELECT * FROM bets WHERE chat_id=? AND result=? ORDER BY created_at DESC LIMIT ?",
-            (str(chat_id), result_filter, limit)
-        ).fetchall()
+    cur = conn.cursor()
+    if DB_TYPE == "postgres":
+        if result_filter:
+            rows = _fetchall(cur, "SELECT * FROM bets WHERE chat_id=%s AND result=%s ORDER BY created_at DESC LIMIT %s",
+                             (str(chat_id), result_filter, limit))
+        else:
+            rows = _fetchall(cur, "SELECT * FROM bets WHERE chat_id=%s ORDER BY created_at DESC LIMIT %s",
+                             (str(chat_id), limit))
     else:
-        rows = conn.execute(
-            "SELECT * FROM bets WHERE chat_id=? ORDER BY created_at DESC LIMIT ?",
-            (str(chat_id), limit)
-        ).fetchall()
+        if result_filter:
+            rows = _fetchall(cur, "SELECT * FROM bets WHERE chat_id=? AND result=? ORDER BY created_at DESC LIMIT ?",
+                             (str(chat_id), result_filter, limit))
+        else:
+            rows = _fetchall(cur, "SELECT * FROM bets WHERE chat_id=? ORDER BY created_at DESC LIMIT ?",
+                             (str(chat_id), limit))
+    cur.close()
     conn.close()
-    return [dict(r) for r in rows]
+    return rows
 
 
 def get_stats(chat_id) -> dict:
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT result, COUNT(*) as n, SUM(stake) as staked, SUM(profit) as profit "
-        "FROM bets WHERE chat_id=? GROUP BY result",
-        (str(chat_id),)
-    ).fetchall()
-    conn.close()
+    cur = conn.cursor()
+    if DB_TYPE == "postgres":
+        cur.execute(
+            "SELECT result, COUNT(*) as n, SUM(stake) as staked, SUM(profit) as profit "
+            "FROM bets WHERE chat_id=%s GROUP BY result", (str(chat_id),)
+        )
+    else:
+        cur.execute(
+            "SELECT result, COUNT(*) as n, SUM(stake) as staked, SUM(profit) as profit "
+            "FROM bets WHERE chat_id=? GROUP BY result", (str(chat_id),)
+        )
 
     stats = {"won": 0, "lost": 0, "pending": 0, "void": 0,
-             "total_staked": 0.0, "total_profit": 0.0, "roi": 0.0}
-    for r in rows:
-        stats[r["result"]] = r["n"]
-        if r["staked"]:
-            stats["total_staked"] += r["staked"]
-        if r["profit"]:
-            stats["total_profit"] += r["profit"]
+             "total_staked": 0.0, "total_profit": 0.0}
+    for row in cur.fetchall():
+        r = row[0]; n = row[1]; staked = row[2] or 0; profit = row[3] or 0
+        stats[r] = n
+        stats["total_staked"] += staked
+        stats["total_profit"] += profit
+
+    cur.close()
+    conn.close()
 
     total_settled = stats["won"] + stats["lost"]
     stats["total_bets"] = total_settled + stats["pending"]
@@ -125,16 +230,20 @@ def get_stats(chat_id) -> dict:
 
 def get_bet_by_id(bet_id: int, chat_id: str) -> dict | None:
     conn = get_conn()
-    row = conn.execute(
-        "SELECT * FROM bets WHERE id=? AND chat_id=?", (bet_id, str(chat_id))
-    ).fetchone()
+    cur = conn.cursor()
+    if DB_TYPE == "postgres":
+        row = _fetchone(cur, "SELECT * FROM bets WHERE id=%s AND chat_id=%s", (bet_id, str(chat_id)))
+    else:
+        row = _fetchone(cur, "SELECT * FROM bets WHERE id=? AND chat_id=?", (bet_id, str(chat_id)))
+    cur.close()
     conn.close()
-    return dict(row) if row else None
+    return row
 
 
 def get_all_bets_web() -> list:
-    """For web dashboard — returns all bets."""
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM bets ORDER BY created_at DESC").fetchall()
+    cur = conn.cursor()
+    rows = _fetchall(cur, "SELECT * FROM bets ORDER BY created_at DESC")
+    cur.close()
     conn.close()
-    return [dict(r) for r in rows]
+    return rows
