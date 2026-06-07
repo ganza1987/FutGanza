@@ -7,12 +7,14 @@ import httpx
 
 from bot_handler import handle_update
 from scheduler import start_scheduler
+from dashboard import router as dashboard_router
+from database import init_db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # e.g. https://yourapp.railway.app
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 
 async def set_webhook():
@@ -27,17 +29,19 @@ async def set_webhook():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    init_db()
     await set_webhook()
     asyncio.create_task(start_scheduler())
     yield
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(dashboard_router)
 
 
 @app.get("/")
 async def root():
-    return {"status": "Football Analysis Bot running ⚽"}
+    return {"status": "FutGanza Bot running ⚽"}
 
 
 @app.post("/webhook")
