@@ -5,6 +5,7 @@ Mounted at /dashboard on the FastAPI app.
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 from database import get_all_bets_web
+from datetime import datetime
 
 router = APIRouter()
 
@@ -23,8 +24,7 @@ async def dashboard():
     profit_sign = "+" if total_profit >= 0 else ""
     roi_sign = "+" if roi >= 0 else ""
 
-    # Build cumulative profit series (chronological order)
-    sorted_bets = sorted(bets, key=lambda b: b["created_at"] or "")
+    sorted_bets = sorted(bets, key=lambda b: b["created_at"] or datetime.min)
     cumulative = []
     running = 0
     for b in sorted_bets:
@@ -35,7 +35,6 @@ async def dashboard():
     cumulative_js = str(cumulative) if cumulative else "[0]"
     labels_js = str(list(range(1, len(cumulative) + 1))) if cumulative else "[1]"
 
-    # Build rows html
     rows_html = ""
     for b in bets:
         result_badge = {
@@ -71,7 +70,7 @@ async def dashboard():
 
     profit_color = "#22c55e" if total_profit >= 0 else "#ef4444"
     roi_color = "#22c55e" if roi >= 0 else "#ef4444"
-    last_bet_date = bets[0]["created_at"][:10] if bets else "—"
+    last_bet_date = str(bets[0]["created_at"])[:10] if bets else "—"
 
     empty_block = '<div style="padding:40px;text-align:center;color:#4a6070;font-size:13px">Aún no hay apuestas registradas.<br>Usa /apuesta en Telegram para empezar.</div>'
     table_block = f"""<table>
