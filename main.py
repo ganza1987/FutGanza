@@ -29,7 +29,10 @@ async def set_webhook():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        logger.warning(f"DB init failed: {e}")
     await set_webhook()
     asyncio.create_task(start_scheduler())
     yield
