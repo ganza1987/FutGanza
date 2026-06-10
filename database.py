@@ -1,16 +1,14 @@
 """
 PostgreSQL database for bet tracking.
 Uses psycopg2 for persistent storage on Render.
+Shared by FutGanza (sport='football') and HandGanza (sport='handball').
 """
 import os
 import logging
 
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://futganza_db_user:Cx9MjEUwzUP1F95jvQcPhC2X5WTaTq5h@dpg-d8iq5ob7uimc73b2mlig-a/futganza_db"
-)
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 try:
     import psycopg2
@@ -24,6 +22,8 @@ except ImportError:
 
 def get_conn():
     if DB_TYPE == "postgres":
+        if not DATABASE_URL:
+            raise RuntimeError("DATABASE_URL no configurada")
         conn = psycopg2.connect(DATABASE_URL)
         return conn
     else:
@@ -48,6 +48,7 @@ def init_db():
                 result      TEXT DEFAULT 'pending',
                 profit      REAL,
                 analysis_id TEXT,
+                sport       TEXT DEFAULT 'football',
                 created_at  TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -60,8 +61,16 @@ def init_db():
                 away       TEXT NOT NULL,
                 score      INTEGER,
                 max_score  INTEGER,
+                sport      TEXT DEFAULT 'football',
                 created_at TIMESTAMP DEFAULT NOW()
             )
+        """)
+        # Añadir columna sport si ya existe la tabla sin ella
+        cur.execute("""
+            ALTER TABLE bets ADD COLUMN IF NOT EXISTS sport TEXT DEFAULT 'football';
+        """)
+        cur.execute("""
+            ALTER TABLE analyses ADD COLUMN IF NOT EXISTS sport TEXT DEFAULT 'football';
         """)
     else:
         cur.executescript("""
@@ -76,6 +85,7 @@ def init_db():
                 result      TEXT DEFAULT 'pending',
                 profit      REAL,
                 analysis_id TEXT,
+                sport       TEXT DEFAULT 'football',
                 created_at  TEXT DEFAULT (datetime('now'))
             );
             CREATE TABLE IF NOT EXISTS analyses (
@@ -86,6 +96,7 @@ def init_db():
                 away       TEXT NOT NULL,
                 score      INTEGER,
                 max_score  INTEGER,
+                sport      TEXT DEFAULT 'football',
                 created_at TEXT DEFAULT (datetime('now'))
             );
         """)
@@ -118,21 +129,21 @@ def _fetchone(cur, query, params=()):
 
 # ── Bets ──────────────────────────────────────────────────────────────────────
 
-def add_bet(chat_id, match, market, odds=None, stake=None, match_date=None, analysis_id=None) -> int:
+def add_bet(chat_id, match, market, odds=None, stake=None, match_date=None, analysis_id=None, sport="football") -> int:
     conn = get_conn()
     cur = conn.cursor()
     if DB_TYPE == "postgres":
         cur.execute(
-            "INSERT INTO bets (chat_id, match, match_date, market, odds, stake, analysis_id) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-            (str(chat_id), match, match_date, market, odds, stake, analysis_id)
+            "INSERT INTO bets (chat_id, match, match_date, market, odds, stake, analysis_id, sport) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (str(chat_id), match, match_date, market, odds, stake, analysis_id, sport)
         )
         bet_id = cur.fetchone()[0]
     else:
         cur.execute(
-            "INSERT INTO bets (chat_id, match, match_date, market, odds, stake, analysis_id) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (str(chat_id), match, match_date, market, odds, stake, analysis_id)
+            "INSERT INTO bets (chat_id, match, match_date, market, odds, stake, analysis_id, sport) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (str(chat_id), match, match_date, market, odds, stake, analysis_id, sport)
         )
         bet_id = cur.lastrowid
     conn.commit()
@@ -173,41 +184,78 @@ def update_bet_result(bet_id: int, result: str):
     conn.close()
 
 
-def get_bets(chat_id, limit=50, result_filter=None):
+def get_bets(chat_id, limit=50, result_filter=None, sport=None):
     conn = get_conn()
     cur = conn.cursor()
+
     if DB_TYPE == "postgres":
-        if result_filter:
-            rows = _fetchall(cur, "SELECT * FROM bets WHERE chat_id=%s AND result=%s ORDER BY created_at DESC LIMIT %s",
-                             (str(chat_id), result_filter, limit))
+        if result_filter and sport:
+            rows = _fetchall(cur,
+                "SELECT * FROM bets WHERE chat_id=%s AND result=%s AND sport=%s ORDER BY created_at DESC LIMIT %s",
+                (str(chat_id), result_filter, sport, limit))
+        elif result_filter:
+            rows = _fetchall(cur,
+                "SELECT * FROM bets WHERE chat_id=%s AND result=%s ORDER BY created_at DESC LIMIT %s",
+                (str(chat_id), result_filter, limit))
+        elif sport:
+            rows = _fetchall(cur,
+                "SELECT * FROM bets WHERE chat_id=%s AND sport=%s ORDER BY created_at DESC LIMIT %s",
+                (str(chat_id), sport, limit))
         else:
-            rows = _fetchall(cur, "SELECT * FROM bets WHERE chat_id=%s ORDER BY created_at DESC LIMIT %s",
-                             (str(chat_id), limit))
+            rows = _fetchall(cur,
+                "SELECT * FROM bets WHERE chat_id=%s ORDER BY created_at DESC LIMIT %s",
+                (str(chat_id), limit))
     else:
-        if result_filter:
-            rows = _fetchall(cur, "SELECT * FROM bets WHERE chat_id=? AND result=? ORDER BY created_at DESC LIMIT ?",
-                             (str(chat_id), result_filter, limit))
+        if result_filter and sport:
+            rows = _fetchall(cur,
+                "SELECT * FROM bets WHERE chat_id=? AND result=? AND sport=? ORDER BY created_at DESC LIMIT ?",
+                (str(chat_id), result_filter, sport, limit))
+        elif result_filter:
+            rows = _fetchall(cur,
+                "SELECT * FROM bets WHERE chat_id=? AND result=? ORDER BY created_at DESC LIMIT ?",
+                (str(chat_id), result_filter, limit))
+        elif sport:
+            rows = _fetchall(cur,
+                "SELECT * FROM bets WHERE chat_id=? AND sport=? ORDER BY created_at DESC LIMIT ?",
+                (str(chat_id), sport, limit))
         else:
-            rows = _fetchall(cur, "SELECT * FROM bets WHERE chat_id=? ORDER BY created_at DESC LIMIT ?",
-                             (str(chat_id), limit))
+            rows = _fetchall(cur,
+                "SELECT * FROM bets WHERE chat_id=? ORDER BY created_at DESC LIMIT ?",
+                (str(chat_id), limit))
+
     cur.close()
     conn.close()
     return rows
 
 
-def get_stats(chat_id) -> dict:
+def get_stats(chat_id, sport=None) -> dict:
     conn = get_conn()
     cur = conn.cursor()
+
     if DB_TYPE == "postgres":
-        cur.execute(
-            "SELECT result, COUNT(*) as n, SUM(stake) as staked, SUM(profit) as profit "
-            "FROM bets WHERE chat_id=%s GROUP BY result", (str(chat_id),)
-        )
+        if sport:
+            cur.execute(
+                "SELECT result, COUNT(*) as n, SUM(stake) as staked, SUM(profit) as profit "
+                "FROM bets WHERE chat_id=%s AND sport=%s GROUP BY result",
+                (str(chat_id), sport)
+            )
+        else:
+            cur.execute(
+                "SELECT result, COUNT(*) as n, SUM(stake) as staked, SUM(profit) as profit "
+                "FROM bets WHERE chat_id=%s GROUP BY result", (str(chat_id),)
+            )
     else:
-        cur.execute(
-            "SELECT result, COUNT(*) as n, SUM(stake) as staked, SUM(profit) as profit "
-            "FROM bets WHERE chat_id=? GROUP BY result", (str(chat_id),)
-        )
+        if sport:
+            cur.execute(
+                "SELECT result, COUNT(*) as n, SUM(stake) as staked, SUM(profit) as profit "
+                "FROM bets WHERE chat_id=? AND sport=? GROUP BY result",
+                (str(chat_id), sport)
+            )
+        else:
+            cur.execute(
+                "SELECT result, COUNT(*) as n, SUM(stake) as staked, SUM(profit) as profit "
+                "FROM bets WHERE chat_id=? GROUP BY result", (str(chat_id),)
+            )
 
     stats = {"won": 0, "lost": 0, "pending": 0, "void": 0,
              "total_staked": 0.0, "total_profit": 0.0}
@@ -240,10 +288,16 @@ def get_bet_by_id(bet_id: int, chat_id: str) -> dict | None:
     return row
 
 
-def get_all_bets_web() -> list:
+def get_all_bets_web(sport=None) -> list:
     conn = get_conn()
     cur = conn.cursor()
-    rows = _fetchall(cur, "SELECT * FROM bets ORDER BY created_at DESC")
+    if sport:
+        if DB_TYPE == "postgres":
+            rows = _fetchall(cur, "SELECT * FROM bets WHERE sport=%s ORDER BY created_at DESC", (sport,))
+        else:
+            rows = _fetchall(cur, "SELECT * FROM bets WHERE sport=? ORDER BY created_at DESC", (sport,))
+    else:
+        rows = _fetchall(cur, "SELECT * FROM bets ORDER BY created_at DESC")
     cur.close()
     conn.close()
     return rows
