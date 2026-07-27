@@ -483,8 +483,7 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
 
     body = {
         "model": "claude-sonnet-5",
-        "max_tokens": 3000,
-        "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 4}],
+        "max_tokens": 8000,
         "messages": [{"role": "user", "content": prompt}],
         "system": (
             "Eres un analista deportivo experto en futbol. Respondes siempre en espanol. "
@@ -494,6 +493,9 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
             "Formato Markdown Telegram. Respuestas concisas."
         ),
     }
+
+    if not data["api_ok"]:
+        body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 4}]
 
     print(f"[DEBUG] Llamando a Anthropic. ANTHROPIC_API_KEY presente: {bool(ANTHROPIC_API_KEY)} (len={len(ANTHROPIC_API_KEY)})")
 
@@ -509,7 +511,7 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
                 if block.get("type") == "text"
             ]
             if not text_parts:
-                print(f"[DEBUG] Respuesta de Anthropic sin texto. content={data_r.get('content')}")
+                print(f"[DEBUG] Respuesta de Anthropic sin texto. stop_reason={data_r.get('stop_reason')} content_types={[b.get('type') for b in data_r.get('content', [])]}")
             return "\n".join(text_parts) if text_parts else "No se pudo generar el analisis."
     except httpx.HTTPStatusError as e:
         print(f"[DEBUG] Anthropic HTTPStatusError: {e.response.status_code} - {e.response.text}")
