@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
-
+logging.basicConfig(level=logging.INFO)
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
 APIFOOTBALL_KEY    = os.getenv("APIFOOTBALL_KEY", "")
 HIGHLIGHTLY_KEY    = os.getenv("HIGHLIGHTLY_KEY", "")
@@ -48,7 +48,7 @@ async def apif_find_team(name: str) -> dict | None:
                 return r
         return results[0]
     except Exception as e:
-        logger.warning(f"apif_find_team({name}): {e}")
+        logger.error(f"apif_find_team({name}): {type(e).__name__}: {e}", exc_info=True)
         return None
 
 async def apif_get_fixtures(team_id: int, last: int = 12) -> list:
