@@ -1,5 +1,6 @@
 import os
 import httpx
+import psycopg2
 import logging
 from datetime import datetime
 
@@ -8,6 +9,7 @@ logging.basicConfig(level=logging.INFO)
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
 APIFOOTBALL_KEY    = os.getenv("APIFOOTBALL_KEY", "")
 HIGHLIGHTLY_KEY    = os.getenv("HIGHLIGHTLY_KEY", "")
+DATABASE_URL       = os.getenv("DATABASE_URL", "")
 ANTHROPIC_URL      = "https://api.anthropic.com/v1/messages"
 APIFOOTBALL_URL    = "https://v3.football.api-sports.io"
 HIGHLIGHTLY_URL    = "https://api.highlightly.net/v1"
@@ -24,6 +26,100 @@ DEFAULT_CONDITIONS = [
     {"id": "home_goals",   "label": "Local promedia mas de 1.5 goles en casa",       "weight": 5},
     {"id": "away_concede", "label": "Visitante encaja en todos sus partidos fuera",  "weight": 4},
 ]
+
+def avg(vals):
+    v = [x for x in vals if x is not None]
+    return round(sum(v)/len(v), 1) if v else None
+
+# Base de datos (Supabase)
+
+def db_get_team_rows(name: str, limit: int = 12) -> list:
+    if not DATABASE_URL:
+        return []
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT equipo_local, equipo_visitante, goles_local, goles_visitante,
+                   corners_local, corners_visitante,
+                   tarjetas_amarillas_local, tarjetas_amarillas_visitante,
+                   tarjetas_rojas_local, tarjetas_rojas_visitante,
+                   tiros_puerta_local, tiros_puerta_visitante,
+                   fecha
+            FROM partidos
+            WHERE equipo_local ILIKE %s OR equipo_visitante ILIKE %s
+            ORDER BY fecha DESC
+            LIMIT %s
+        """, (f"%{name}%", f"%{name}%", limit))
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description]
+        cur.close()
+        conn.close()
+        result = [dict(zip(cols, r)) for r in rows]
+        print(f"[DEBUG] db_get_team_rows({name}): {len(result)} filas encontradas")
+        return result
+    except Exception as e:
+        print(f"[DEBUG] db_get_team_rows({name}) FALLO: {type(e).__name__}: {e}")
+        return []
+
+def db_team_data(name: str) -> dict | None:
+    rows = db_get_team_rows(name, 12)
+    if not rows:
+        return None
+
+    home_rows = [r for r in rows if name.lower() in (r["equipo_local"] or "").lower()]
+    away_rows = [r for r in rows if name.lower() in (r["equipo_visitante"] or "").lower()]
+
+    matched_name = name
+    if home_rows:
+        matched_name = home_rows[0]["equipo_local"]
+    elif away_rows:
+        matched_name = away_rows[0]["equipo_visitante"]
+
+    def calc(row_list, is_home):
+        gf_l, ga_l, corners_l, shots_l, cards_l = [], [], [], [], []
+        results_fmt = []
+        for row in row_list[:6]:
+            if is_home:
+                gf, gc = row["goles_local"], row["goles_visitante"]
+                corners = row["corners_local"]
+                shots = row["tiros_puerta_local"]
+                ca = row["tarjetas_amarillas_local"] or 0
+                cr = row["tarjetas_rojas_local"] or 0
+                opp = row["equipo_visitante"]
+            else:
+                gf, gc = row["goles_visitante"], row["goles_local"]
+                corners = row["corners_visitante"]
+                shots = row["tiros_puerta_visitante"]
+                ca = row["tarjetas_amarillas_visitante"] or 0
+                cr = row["tarjetas_rojas_visitante"] or 0
+                opp = row["equipo_local"]
+            if gf is None or gc is None:
+                continue
+            gf_l.append(gf)
+            ga_l.append(gc)
+            if corners is not None:
+                corners_l.append(corners)
+            if shots is not None:
+                shots_l.append(shots)
+            cards_l.append(ca + cr)
+            r = "W" if gf > gc else "D" if gf == gc else "L"
+            emoji = "OK" if r == "W" else "EQ" if r == "D" else "NO"
+            results_fmt.append(f"{emoji}{gf}-{gc} {(opp or '?')[:7]}")
+        return {
+            "results": results_fmt[:5],
+            "gf": avg(gf_l), "ga": avg(ga_l),
+            "corners": avg(corners_l),
+            "shots": avg(shots_l),
+            "cards": avg(cards_l),
+        }
+
+    return {
+        "home": calc(home_rows, True),
+        "away": calc(away_rows, False),
+        "source": "Base de datos propia",
+        "matched_name": matched_name,
+    }
 
 # API-Football
 
@@ -122,12 +218,6 @@ async def hl_get_h2h(id1, id2, last: int = 5) -> list:
     except Exception as e:
         return []
 
-# Helpers
-
-def avg(vals):
-    v = [x for x in vals if x is not None]
-    return round(sum(v)/len(v), 1) if v else None
-
 def nd(val):
     return str(val) if val is not None else None
 
@@ -149,8 +239,6 @@ def fmt_result_apif(fix: dict, team_id: int) -> str:
     opp = fix["teams"]["away"]["name"] if is_home else fix["teams"]["home"]["name"]
     emoji = "OK" if r == "W" else "EQ" if r == "D" else "NO"
     return f"{emoji}{gh}-{ga} {opp[:7]}"
-
-# API-Football team data
 
 async def apif_team_data(team_id: int) -> dict:
     fixes = await apif_get_fixtures(team_id, 12)
@@ -189,7 +277,6 @@ async def apif_team_data(team_id: int) -> dict:
             "corners": avg(corners_l),
             "shots": avg(shots_l),
             "cards": avg(cards_l),
-            "fixes": fix_list[:5],
         }
 
     return {
@@ -197,8 +284,6 @@ async def apif_team_data(team_id: int) -> dict:
         "away": await calc(away_fixes, "away"),
         "source": "API-Football",
     }
-
-# Highlightly team data
 
 async def hl_team_data(team_id) -> dict:
     fixes = await hl_get_fixtures(team_id, 10)
@@ -240,7 +325,6 @@ async def hl_team_data(team_id) -> dict:
             "results": results_fmt,
             "gf": avg(gf_l), "ga": avg(ga_l),
             "corners": None, "shots": None, "cards": None,
-            "fixes": fix_list[:5],
         }
 
     return {
@@ -249,31 +333,50 @@ async def hl_team_data(team_id) -> dict:
         "source": "Highlightly",
     }
 
-# Main data builder
+# Constructor principal de datos: primero base de datos propia, luego APIs en vivo
 
 async def build_real_data(home_name: str, away_name: str) -> dict:
-    ht_apif = await apif_find_team(home_name)
-    at_apif = await apif_find_team(away_name)
-
-    home_data, away_data = None, None
-    home_team_info, away_team_info = None, None
-    h2h = []
     sources = []
 
-    if ht_apif:
-        home_data = await apif_team_data(ht_apif["team"]["id"])
-        home_team_info = ht_apif
-        sources.append("API-Football")
+    home_db = db_team_data(home_name)
+    away_db = db_team_data(away_name)
 
-    if at_apif:
-        away_data = await apif_team_data(at_apif["team"]["id"])
-        away_team_info = at_apif
+    home_db_ok = bool(home_db and (home_db["home"]["results"] or home_db["away"]["results"]))
+    away_db_ok = bool(away_db and (away_db["home"]["results"] or away_db["away"]["results"]))
+
+    home_data = home_db if home_db_ok else None
+    away_data = away_db if away_db_ok else None
+    home_team_info = {"team": {"name": home_db["matched_name"]}} if home_db_ok else None
+    away_team_info = {"team": {"name": away_db["matched_name"]}} if away_db_ok else None
+
+    if home_db_ok:
+        sources.append("Base de datos propia")
+    if away_db_ok:
+        sources.append("Base de datos propia")
+
+    ht_apif = None
+    at_apif = None
+    h2h = []
+
+    if not home_db_ok:
+        ht_apif = await apif_find_team(home_name)
+        if ht_apif:
+            home_data = await apif_team_data(ht_apif["team"]["id"])
+            home_team_info = ht_apif
+            sources.append("API-Football")
+
+    if not away_db_ok:
+        at_apif = await apif_find_team(away_name)
+        if at_apif:
+            away_data = await apif_team_data(at_apif["team"]["id"])
+            away_team_info = at_apif
+            sources.append("API-Football")
 
     if ht_apif and at_apif:
         h2h = await apif_get_h2h(ht_apif["team"]["id"], at_apif["team"]["id"])
 
-    home_needs_hl = not home_data or (home_data["home"]["corners"] is None and home_data["away"]["corners"] is None)
-    away_needs_hl = not away_data or (away_data["home"]["corners"] is None and away_data["away"]["corners"] is None)
+    home_needs_hl = (not home_db_ok) and (not home_data or (home_data["home"]["corners"] is None and home_data["away"]["corners"] is None))
+    away_needs_hl = (not away_db_ok) and (not away_data or (away_data["home"]["corners"] is None and away_data["away"]["corners"] is None))
 
     if home_needs_hl:
         ht_hl = await hl_find_team(home_name)
@@ -309,9 +412,10 @@ async def build_real_data(home_name: str, away_name: str) -> dict:
             else:
                 away_data = hl_data
                 away_team_info = at_hl
+            sources.append("Highlightly")
 
     api_ok = home_data is not None or away_data is not None
-    source_str = " + ".join(set(sources)) if sources else "Busqueda web"
+    source_str = " + ".join(dict.fromkeys(sources)) if sources else "Busqueda web"
 
     both_found = home_data is not None and away_data is not None
     has_results = (
@@ -336,7 +440,7 @@ async def build_real_data(home_name: str, away_name: str) -> dict:
         "source": source_str,
         "confidence": confidence,
     }
-    print(f"[DEBUG] build_real_data({home_name}, {away_name}) -> api_ok={api_ok} source={source_str} confidence={confidence} home_found={ht_apif is not None} away_found={at_apif is not None}")
+    print(f"[DEBUG] build_real_data({home_name}, {away_name}) -> api_ok={api_ok} source={source_str} confidence={confidence} home_db={home_db_ok} away_db={away_db_ok} home_apif={ht_apif is not None} away_apif={at_apif is not None}")
     return result
 
 # Prompt builder
@@ -418,12 +522,12 @@ def build_prompt(home: str, away: str, conditions: list[dict], data: dict) -> st
 
     if confidence == "high":
         confidence_banner = ""
-        confidence_footer = f"_{data.get('source', 'API-Football')} - {now}_"
+        confidence_footer = f"_{data.get('source', 'Base de datos propia')} - {now}_"
     elif confidence == "medium":
-        confidence_banner = "DATOS PARCIALES: solo un equipo encontrado en APIs. Evalua condiciones con cautela.\n\n"
+        confidence_banner = "DATOS PARCIALES: solo un equipo con datos completos. Evalua condiciones con cautela.\n\n"
         confidence_footer = f"_Datos parciales - {data.get('source', '')} - {now}_"
     else:
-        confidence_banner = "DATOS NO VERIFICADOS: liga no cubierta por APIs. Analisis basado en busqueda web, tomalo con precaucion.\n\n"
+        confidence_banner = "DATOS NO VERIFICADOS: sin cobertura suficiente. Analisis basado en busqueda web, tomalo con precaucion.\n\n"
         confidence_footer = f"_Datos no verificados - Busqueda web - {now}_"
 
     cond_list = "\n".join(f'- {c["label"]} (peso {c["weight"]})' for c in conditions)
