@@ -6,8 +6,8 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
-APIFOOTBALL_KEY    = os.getenv("APIFOOTBALL_KEY", "888285a75737af52283245495c97c67a")
-HIGHLIGHTLY_KEY    = os.getenv("HIGHLIGHTLY_KEY", "5d807f42-7832-40e7-9b0c-50d05280742f")
+APIFOOTBALL_KEY    = os.getenv("APIFOOTBALL_KEY", "")
+HIGHLIGHTLY_KEY    = os.getenv("HIGHLIGHTLY_KEY", "")
 ANTHROPIC_URL      = "https://api.anthropic.com/v1/messages"
 APIFOOTBALL_URL    = "https://v3.football.api-sports.io"
 HIGHLIGHTLY_URL    = "https://api.highlightly.net/v1"
@@ -484,7 +484,7 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
     }
 
     body = {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "max_tokens": 3000,
         "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 4}],
         "messages": [{"role": "user", "content": prompt}],
