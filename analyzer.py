@@ -42,13 +42,14 @@ async def apif_find_team(name: str) -> dict | None:
         data = await apif("teams", {"search": name})
         results = data.get("response", [])
         if not results:
+            print(f"[DEBUG] apif_find_team({name}): 0 resultados")
             return None
         for r in results:
             if name.lower() in r["team"]["name"].lower():
                 return r
         return results[0]
     except Exception as e:
-        logger.error(f"apif_find_team({name}): {type(e).__name__}: {e}", exc_info=True)
+        print(f"[DEBUG] apif_find_team({name}) FALLO: {type(e).__name__}: {e}")
         return None
 
 async def apif_get_fixtures(team_id: int, last: int = 12) -> list:
@@ -56,7 +57,7 @@ async def apif_get_fixtures(team_id: int, last: int = 12) -> list:
         data = await apif("fixtures", {"team": team_id, "last": last})
         return data.get("response", [])
     except Exception as e:
-        logger.warning(f"apif_get_fixtures: {e}")
+        print(f"[DEBUG] apif_get_fixtures FALLO: {type(e).__name__}: {e}")
         return []
 
 async def apif_get_h2h(id1: int, id2: int) -> list:
@@ -103,7 +104,7 @@ async def hl_find_team(name: str) -> dict | None:
                 return r
         return results[0]
     except Exception as e:
-        logger.warning(f"hl_find_team({name}): {e}")
+        print(f"[DEBUG] hl_find_team({name}) FALLO: {type(e).__name__}: {e}")
         return None
 
 async def hl_get_fixtures(team_id, last: int = 10) -> list:
@@ -111,7 +112,7 @@ async def hl_get_fixtures(team_id, last: int = 10) -> list:
         data = await hl("fixtures", {"team": team_id, "last": last})
         return data.get("data", data.get("fixtures", data.get("response", [])))
     except Exception as e:
-        logger.warning(f"hl_get_fixtures: {e}")
+        print(f"[DEBUG] hl_get_fixtures FALLO: {type(e).__name__}: {e}")
         return []
 
 async def hl_get_h2h(id1, id2, last: int = 5) -> list:
@@ -332,7 +333,7 @@ async def build_real_data(home_name: str, away_name: str) -> dict:
     else:
         confidence = "low"     # No API data, falling back to web search
 
-    return {
+    result = {
         "home_team": home_team_info,
         "away_team": away_team_info,
         "home_data": home_data,
@@ -342,6 +343,8 @@ async def build_real_data(home_name: str, away_name: str) -> dict:
         "source": source_str,
         "confidence": confidence,
     }
+    print(f"[DEBUG] build_real_data({home_name}, {away_name}) -> api_ok={api_ok} source={source_str} confidence={confidence} home_found={ht_apif is not None} away_found={at_apif is not None}")
+    return result
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
 
@@ -412,105 +415,4 @@ def build_prompt(home: str, away: str, conditions: list[dict], data: dict) -> st
 
     confidence = data.get("confidence", "low")
     web_instruction = "" if data["api_ok"] else f"""
-Sin datos en APIs. Usa web_search:
-1. "sofascore {home} resultados 2026"
-2. "sofascore {away} resultados 2026"
-3. "{home} {away} head to head"
-"""
-
-    # Confidence banner
-    if confidence == "high":
-        confidence_banner = ""
-        confidence_footer = f"📡 _{data.get('source', 'API-Football')} · {now}_"
-    elif confidence == "medium":
-        confidence_banner = "⚠️ DATOS PARCIALES: solo un equipo encontrado en APIs. Evalúa condiciones con cautela.\n\n"
-        confidence_footer = f"⚠️ _Datos parciales · {data.get('source', '')} · {now}_"
-    else:
-        confidence_banner = "⚠️ DATOS NO VERIFICADOS: liga no cubierta por APIs. Análisis basado en búsqueda web — tómalo con precaución.\n\n"
-        confidence_footer = f"⚠️ _Datos no verificados · Búsqueda web · {now}_"
-
-    cond_list = "\n".join(f'• {c["label"]} (peso {c["weight"]})' for c in conditions)
-
-    return f"""Analista deportivo. Análisis BREVE para Telegram. Máximo 1800 caracteres.
-
-REGLA CRÍTICA: USA SOLO los datos proporcionados. NUNCA inventes porcentajes ni promedios.
-Si no tienes un dato, no lo menciones.
-Nivel de confianza de los datos: {confidence.upper()}
-
-{web_instruction}
-DATOS:
-{data_str}
-
-CONDICIONES A EVALUAR:
-{cond_list}
-
-FORMATO EXACTO:
-
-{confidence_banner}⚽ *{home.upper()} vs {away.upper()}*
-_[competición] · {now}_
-
-🔵 *{home}* · [✅❌🟡 x5 casa en una línea]
-Goles casa: X marc / X enc | Córners: X | Disparos: X | Tarj: X _(omite si no hay dato)_
-
-🔴 *{away}* · [✅❌🟡 x5 fuera en una línea]
-Goles fuera: X marc / X enc | Córners: X | Disparos: X | Tarj: X _(omite si no hay dato)_
-
-⚔️ *H2H* · [últimos 3] · media goles: X
-
-━━━━━━━━━━━━━━━━
-✅ *Condiciones*
-[cada una en UNA línea: ✅/❌ Nombre — motivo basado SOLO en datos reales]
-
-📊 *X/{max_pts} pts · X%*
-🟢 FAVORABLE / 🟡 DUDOSO / 🔴 NO RECOMENDABLE
-
-🔮 [1 frase conclusión]
-{confidence_footer}"""
-
-
-async def analyze_match(home: str, away: str, conditions: list[dict] | None = None) -> str:
-    if conditions is None:
-        conditions = DEFAULT_CONDITIONS
-
-    data = await build_real_data(home, away)
-    logger.info(f"Sources: {data['source']} for {home} vs {away}")
-
-    prompt = build_prompt(home, away, conditions, data)
-
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
-    body = {
-        "model": "claude-sonnet-5",
-        "max_tokens": 3000,
-        "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 4}],
-        "messages": [{"role": "user", "content": prompt}],
-        "system": (
-            "Eres un analista deportivo experto en fútbol. Respondes siempre en español. "
-            "Usas SOLO los datos reales proporcionados. "
-            "NUNCA inventes estadísticas, porcentajes ni promedios. "
-            "Si no tienes un dato, no lo menciones. "
-            "Formato Markdown Telegram. Respuestas concisas."
-        ),
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(ANTHROPIC_URL, headers=headers, json=body)
-            r.raise_for_status()
-            data_r = r.json()
-            text_parts = [
-                block["text"]
-                for block in data_r.get("content", [])
-                if block.get("type") == "text"
-            ]
-            return "\n".join(text_parts) if text_parts else "❌ No se pudo generar el análisis."
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Anthropic API error: {e.response.text}")
-        return "❌ Error al generar el análisis. Inténtalo de nuevo en unos segundos."
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        return "❌ Error inesperado. Revisa los logs del servidor."
+Sin datos en APIs. Usa
