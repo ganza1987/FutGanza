@@ -32,6 +32,14 @@ import psycopg2
 LIGAS = [
     {"api_league_id": 113, "nombre": "Allsvenskan", "pais": "Suecia"},
     {"api_league_id": 103, "nombre": "Eliteserien", "pais": "Noruega"},
+    {"api_league_id": 119, "nombre": "Superliga", "pais": "Dinamarca"},
+    {"api_league_id": 164, "nombre": "Urvalsdeild", "pais": "Islandia"},
+    {"api_league_id": 244, "nombre": "Veikkausliiga", "pais": "Finlandia"},
+    {"api_league_id": 283, "nombre": "Liga I", "pais": "Rumania"},
+    {"api_league_id": 169, "nombre": "Super League", "pais": "China"},
+    {"api_league_id": 98, "nombre": "J1 League", "pais": "Japon"},
+    {"api_league_id": 288, "nombre": "Premier Soccer League", "pais": "Sudafrica"},
+    {"api_league_id": 253, "nombre": "Major League Soccer", "pais": "EEUU"},
 ]
 
 TEMPORADA = 2026  # temporada que quieres descargar
