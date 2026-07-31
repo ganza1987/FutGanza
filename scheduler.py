@@ -70,7 +70,7 @@ AMERICAN_LEAGUES = {
 
 # Horarios (hora España) para "Ligas con datos": primera revisión y repaso de mediodía
 LIGAS_CON_DATOS_SEND_HOUR    = 6    # 06:00 AM Spain
-LIGAS_CON_DATOS_SEND_HOUR_2  = 12   # 12:30 PM Spain
+LIGAS_CON_DATOS_SEND_HOUR_2  = 14   # 14:30 Spain (PRUEBA)
 LIGAS_CON_DATOS_SEND_MINUTE_2 = 30
 
 ASIAN_SEND_HOUR    = 6   # 6:00 AM Spain
