@@ -1,5 +1,7 @@
 """
-Scheduler: sends automatic daily analysis for Asian and American leagues.
+Scheduler: sends automatic daily analysis for Asian, American leagues,
+and now also for the leagues that have match data ingested in Supabase.
+- Ligas con datos (partidos): 8:00 AM Spain time
 - Asian leagues: 6:00 AM Spain time
 - American leagues: 10:00 AM Spain time
 Also supports manual fixtures via fixtures.json.
@@ -22,6 +24,21 @@ APIFOOTBALL_KEY  = os.getenv("APIFOOTBALL_KEY", "888285a75737af52283245495c97c67
 APIFOOTBALL_URL  = "https://v3.football.api-sports.io"
 
 # ── League definitions ─────────────────────────────────────────────────────────
+
+# Estas son las 10 ligas que ya tienen partidos guardados en Supabase
+# (las mismas que ingiere build_database.py). IDs de API-Football.
+LIGAS_CON_DATOS = {
+    113: "Allsvenskan (Suecia)",
+    103: "Eliteserien (Noruega)",
+    119: "Superliga (Dinamarca)",
+    164: "Úrvalsdeild (Islandia)",
+    244: "Veikkausliiga (Finlandia)",
+    283: "Liga I (Rumanía)",
+    169: "Super League (China)",
+    98:  "J1 League (Japón)",
+    288: "Premier Soccer League (Sudáfrica)",
+    253: "Major League Soccer (EEUU)",
+}
 
 ASIAN_LEAGUES = {
     292: "K League 1",
@@ -50,8 +67,9 @@ AMERICAN_LEAGUES = {
     233: "Canadian Premier League",
 }
 
-ASIAN_SEND_HOUR    = 6   # 6:00 AM Spain
-AMERICAN_SEND_HOUR = 10  # 10:00 AM Spain
+LIGAS_CON_DATOS_SEND_HOUR = 6   # 6:00 AM Spain
+ASIAN_SEND_HOUR           = 6   # 6:00 AM Spain
+AMERICAN_SEND_HOUR        = 10  # 10:00 AM Spain
 
 
 def get_notify_chat_ids() -> list[str]:
@@ -184,6 +202,10 @@ async def send_daily_analysis(leagues: dict, region_name: str, region_emoji: str
         )
 
 
+async def send_daily_ligas_con_datos_analysis():
+    await send_daily_analysis(LIGAS_CON_DATOS, "Ligas con datos", "📊")
+
+
 async def send_daily_asian_analysis():
     await send_daily_analysis(ASIAN_LEAGUES, "Ligas Asiáticas", "🌏")
 
@@ -201,6 +223,14 @@ async def start_scheduler():
         try:
             now_utc = datetime.now(timezone.utc)
             today_key = now_utc.strftime("%Y-%m-%d")
+
+            # ── Daily "Ligas con datos" analysis at 8 AM Spain ────────────────
+            datos_key = f"datos_{today_key}"
+            if now_utc.hour == to_utc_hour(LIGAS_CON_DATOS_SEND_HOUR) and now_utc.minute < 10:
+                if datos_key not in already_sent:
+                    logger.info(f"Triggering daily 'Ligas con datos' analysis for {today_key}")
+                    already_sent.add(datos_key)
+                    await send_daily_ligas_con_datos_analysis()
 
             # ── Daily Asian analysis at 6 AM Spain ────────────────────────────
             asian_key = f"asian_{today_key}"
