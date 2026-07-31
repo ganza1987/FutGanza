@@ -1,7 +1,8 @@
 """
 Scheduler: sends automatic daily analysis for Asian, American leagues,
-and now also for the leagues that have match data ingested in Supabase.
-- Ligas con datos (partidos): 8:00 AM Spain time
+and for the leagues that have match data ingested in Supabase.
+- Ligas con datos (partidos): 06:00 AM Spain time (revisión 1)
+- Ligas con datos (partidos): 12:30 PM Spain time (revisión 2)
 - Asian leagues: 6:00 AM Spain time
 - American leagues: 10:00 AM Spain time
 Also supports manual fixtures via fixtures.json.
@@ -67,9 +68,13 @@ AMERICAN_LEAGUES = {
     233: "Canadian Premier League",
 }
 
-LIGAS_CON_DATOS_SEND_HOUR = 6   # 6:00 AM Spain
-ASIAN_SEND_HOUR           = 6   # 6:00 AM Spain
-AMERICAN_SEND_HOUR        = 10  # 10:00 AM Spain
+# Horarios (hora España) para "Ligas con datos": primera revisión y repaso de mediodía
+LIGAS_CON_DATOS_SEND_HOUR    = 6    # 06:00 AM Spain
+LIGAS_CON_DATOS_SEND_HOUR_2  = 12   # 12:30 PM Spain
+LIGAS_CON_DATOS_SEND_MINUTE_2 = 30
+
+ASIAN_SEND_HOUR    = 6   # 6:00 AM Spain
+AMERICAN_SEND_HOUR = 10  # 10:00 AM Spain
 
 
 def get_notify_chat_ids() -> list[str]:
@@ -206,6 +211,10 @@ async def send_daily_ligas_con_datos_analysis():
     await send_daily_analysis(LIGAS_CON_DATOS, "Ligas con datos", "📊")
 
 
+async def send_daily_ligas_con_datos_analysis_mediodia():
+    await send_daily_analysis(LIGAS_CON_DATOS, "Ligas con datos (repaso mediodía)", "📊")
+
+
 async def send_daily_asian_analysis():
     await send_daily_analysis(ASIAN_LEAGUES, "Ligas Asiáticas", "🌏")
 
@@ -224,13 +233,23 @@ async def start_scheduler():
             now_utc = datetime.now(timezone.utc)
             today_key = now_utc.strftime("%Y-%m-%d")
 
-            # ── Daily "Ligas con datos" analysis at 8 AM Spain ────────────────
+            # ── Daily "Ligas con datos" analysis at 06:00 Spain ───────────────
             datos_key = f"datos_{today_key}"
             if now_utc.hour == to_utc_hour(LIGAS_CON_DATOS_SEND_HOUR) and now_utc.minute < 10:
                 if datos_key not in already_sent:
                     logger.info(f"Triggering daily 'Ligas con datos' analysis for {today_key}")
                     already_sent.add(datos_key)
                     await send_daily_ligas_con_datos_analysis()
+
+            # ── Daily "Ligas con datos" 2nd check at 12:30 Spain ──────────────
+            datos_key_2 = f"datos2_{today_key}"
+            utc_hour_2 = to_utc_hour(LIGAS_CON_DATOS_SEND_HOUR_2)
+            if (now_utc.hour == utc_hour_2
+                    and LIGAS_CON_DATOS_SEND_MINUTE_2 <= now_utc.minute < LIGAS_CON_DATOS_SEND_MINUTE_2 + 10):
+                if datos_key_2 not in already_sent:
+                    logger.info(f"Triggering midday 'Ligas con datos' check for {today_key}")
+                    already_sent.add(datos_key_2)
+                    await send_daily_ligas_con_datos_analysis_mediodia()
 
             # ── Daily Asian analysis at 6 AM Spain ────────────────────────────
             asian_key = f"asian_{today_key}"
