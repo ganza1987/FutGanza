@@ -646,7 +646,7 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
 
     body = {
         "model": "claude-sonnet-5",
-        "max_tokens": 8000,
+        "max_tokens": 1500,
         "messages": [{"role": "user", "content": prompt}],
         "system": (
             "Eres un analista deportivo experto en futbol. Respondes siempre en espanol. "
