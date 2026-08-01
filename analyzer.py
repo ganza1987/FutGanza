@@ -61,10 +61,6 @@ def _name_variants(name: str) -> set:
         filtered = [w for w in words if w.upper() not in _CLUB_TOKENS_COMUNES]
         if filtered and filtered != words:
             variants.add(" ".join(filtered))
-        # La palabra mas larga suele ser el nombre distintivo del club
-        longest = max(words, key=len)
-        if len(longest) >= 5:
-            variants.add(longest)
     return {v for v in variants if v}
 
 
