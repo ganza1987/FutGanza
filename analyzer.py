@@ -33,30 +33,89 @@ def avg(vals):
 
 # Base de datos (Supabase)
 
+# Prefijos/sufijos de club muy comunes que suelen variar entre fuentes de
+# datos distintas (p.ej. "IBV Vestmannaeyjar" en una fuente vs solo
+# "Vestmannaeyjar" en otra). Se usan para generar variantes de búsqueda.
+_CLUB_TOKENS_COMUNES = {
+    "FC", "CF", "SC", "AC", "AS", "CD", "SD", "UD", "RC", "CA", "CE", "EC",
+    "AFC", "SK", "BK", "IF", "IK", "IBV", "KS", "FK", "US", "RS",
+}
+
+
+def _name_variants(name: str) -> set:
+    """Genera variantes de un nombre de equipo (con y sin abreviaturas de
+    club habituales) para poder encontrarlo aunque distintas fuentes de
+    datos lo escriban de forma diferente."""
+    name = (name or "").strip()
+    if not name:
+        return set()
+    variants = {name}
+    words = name.split()
+    if len(words) > 1:
+        # Quita un posible prefijo/sufijo abreviado en mayúsculas (ej. "IBV Vestmannaeyjar")
+        if words[0].isupper() and len(words[0]) <= 4:
+            variants.add(" ".join(words[1:]))
+        if words[-1].isupper() and len(words[-1]) <= 4:
+            variants.add(" ".join(words[:-1]))
+        # Quita tokens de club muy comunes (FC, CD, SK...) estén donde estén
+        filtered = [w for w in words if w.upper() not in _CLUB_TOKENS_COMUNES]
+        if filtered and filtered != words:
+            variants.add(" ".join(filtered))
+        # La palabra mas larga suele ser el nombre distintivo del club
+        longest = max(words, key=len)
+        if len(longest) >= 5:
+            variants.add(longest)
+    return {v for v in variants if v}
+
+
+def _names_match(a: str, b: str) -> bool:
+    """Compara dos nombres de equipo de forma tolerante: prueba varias
+    variantes de 'a' contra 'b' en ambas direcciones, en vez de exigir
+    que uno contenga literalmente al otro completo."""
+    b_low = (b or "").lower().strip()
+    if not b_low:
+        return False
+    for v in _name_variants(a):
+        v_low = v.lower()
+        if v_low in b_low or b_low in v_low:
+            return True
+    return False
+
+
 def db_get_team_rows(name: str, limit: int = 12) -> list:
     if not DATABASE_URL:
         return []
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        cur.execute("""
-            SELECT equipo_local, equipo_visitante, goles_local, goles_visitante,
+        variants = _name_variants(name)
+        conditions = []
+        params: list = []
+        for v in variants:
+            conditions.append("equipo_local ILIKE %s")
+            params.append(f"%{v}%")
+            conditions.append("equipo_visitante ILIKE %s")
+            params.append(f"%{v}%")
+        where_clause = " OR ".join(conditions)
+        params.append(limit)
+        cur.execute(f"""
+            SELECT DISTINCT equipo_local, equipo_visitante, goles_local, goles_visitante,
                    corners_local, corners_visitante,
                    tarjetas_amarillas_local, tarjetas_amarillas_visitante,
                    tarjetas_rojas_local, tarjetas_rojas_visitante,
                    tiros_puerta_local, tiros_puerta_visitante,
                    fecha
             FROM partidos
-            WHERE equipo_local ILIKE %s OR equipo_visitante ILIKE %s
+            WHERE {where_clause}
             ORDER BY fecha DESC
             LIMIT %s
-        """, (f"%{name}%", f"%{name}%", limit))
+        """, params)
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
         cur.close()
         conn.close()
         result = [dict(zip(cols, r)) for r in rows]
-        print(f"[DEBUG] db_get_team_rows({name}): {len(result)} filas encontradas")
+        print(f"[DEBUG] db_get_team_rows({name}): {len(result)} filas encontradas (variantes: {variants})")
         return result
     except Exception as e:
         print(f"[DEBUG] db_get_team_rows({name}) FALLO: {type(e).__name__}: {e}")
@@ -67,8 +126,8 @@ def db_team_data(name: str) -> dict | None:
     if not rows:
         return None
 
-    home_rows = [r for r in rows if name.lower() in (r["equipo_local"] or "").lower()]
-    away_rows = [r for r in rows if name.lower() in (r["equipo_visitante"] or "").lower()]
+    home_rows = [r for r in rows if _names_match(name, r["equipo_local"])]
+    away_rows = [r for r in rows if _names_match(name, r["equipo_visitante"])]
 
     matched_name = name
     if home_rows:
