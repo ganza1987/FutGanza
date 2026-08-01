@@ -1,10 +1,8 @@
 """
-Scheduler: sends automatic daily analysis for Asian, American leagues,
-and for the leagues that have match data ingested in Supabase.
-- Ligas con datos (partidos): 06:00 AM Spain time (revisión 1)
-- Ligas con datos (partidos): 12:30 PM Spain time (revisión 2)
-- Asian leagues: 6:00 AM Spain time
-- American leagues: 10:00 AM Spain time
+Scheduler: sends automatic daily analysis ONLY for the leagues that have
+match data ingested in Supabase (las 10 ligas de build_database.py).
+- Ligas con datos: 06:00 AM Spain time (revision 1)
+- Ligas con datos: 12:30 PM Spain time (revision 2, repaso de mediodia)
 Also supports manual fixtures via fixtures.json.
 """
 
@@ -28,6 +26,7 @@ APIFOOTBALL_URL  = "https://v3.football.api-sports.io"
 
 # Estas son las 10 ligas que ya tienen partidos guardados en Supabase
 # (las mismas que ingiere build_database.py). IDs de API-Football.
+# Son las UNICAS ligas que este scheduler analiza automaticamente.
 LIGAS_CON_DATOS = {
     113: "Allsvenskan (Suecia)",
     103: "Eliteserien (Noruega)",
@@ -41,40 +40,10 @@ LIGAS_CON_DATOS = {
     253: "Major League Soccer (EEUU)",
 }
 
-ASIAN_LEAGUES = {
-    292: "K League 1",
-    293: "K League 2",
-    98:  "J1 League",
-    99:  "J2 League",
-    169: "Chinese Super League",
-    170: "China League One",
-    323: "Indian Super League",
-    296: "Thai League 1",
-    188: "A-League",
-    17:  "AFC Champions League",
-}
-
-AMERICAN_LEAGUES = {
-    253: "MLS",
-    262: "Liga MX",
-    71:  "Brasileirao Serie A",
-    72:  "Brasileirao Serie B",
-    128: "Liga Profesional Argentina",
-    131: "Primera B Nacional Argentina",
-    239: "Liga BetPlay Colombia",
-    265: "Primera División Chile",
-    281: "Liga 1 Perú",
-    268: "Liga AUF Uruguay",
-    233: "Canadian Premier League",
-}
-
-# Horarios (hora España) para "Ligas con datos": primera revisión y repaso de mediodía
-LIGAS_CON_DATOS_SEND_HOUR    = 6    # 06:00 AM Spain
-LIGAS_CON_DATOS_SEND_HOUR_2  = 15   # 15:10 Spain (PRUEBA)
-LIGAS_CON_DATOS_SEND_MINUTE_2 = 10
-
-ASIAN_SEND_HOUR    = 6   # 6:00 AM Spain
-AMERICAN_SEND_HOUR = 10  # 10:00 AM Spain
+# Horarios (hora España) para "Ligas con datos": primera revision y repaso de mediodia
+LIGAS_CON_DATOS_SEND_HOUR     = 6    # 06:00 AM Spain
+LIGAS_CON_DATOS_SEND_HOUR_2   = 12   # 12:30 PM Spain
+LIGAS_CON_DATOS_SEND_MINUTE_2 = 30
 
 
 def get_notify_chat_ids() -> list[str]:
@@ -215,14 +184,6 @@ async def send_daily_ligas_con_datos_analysis_mediodia():
     await send_daily_analysis(LIGAS_CON_DATOS, "Ligas con datos (repaso mediodía)", "📊")
 
 
-async def send_daily_asian_analysis():
-    await send_daily_analysis(ASIAN_LEAGUES, "Ligas Asiáticas", "🌏")
-
-
-async def send_daily_american_analysis():
-    await send_daily_analysis(AMERICAN_LEAGUES, "Ligas Americanas", "🌎")
-
-
 async def start_scheduler():
     """Main scheduler loop."""
     logger.info("Scheduler started.")
@@ -250,22 +211,6 @@ async def start_scheduler():
                     logger.info(f"Triggering midday 'Ligas con datos' check for {today_key}")
                     already_sent.add(datos_key_2)
                     await send_daily_ligas_con_datos_analysis_mediodia()
-
-            # ── Daily Asian analysis at 6 AM Spain ────────────────────────────
-            asian_key = f"asian_{today_key}"
-            if now_utc.hour == to_utc_hour(ASIAN_SEND_HOUR) and now_utc.minute < 10:
-                if asian_key not in already_sent:
-                    logger.info(f"Triggering daily Asian analysis for {today_key}")
-                    already_sent.add(asian_key)
-                    await send_daily_asian_analysis()
-
-            # ── Daily American analysis at 10 AM Spain ────────────────────────
-            american_key = f"american_{today_key}"
-            if now_utc.hour == to_utc_hour(AMERICAN_SEND_HOUR) and now_utc.minute < 10:
-                if american_key not in already_sent:
-                    logger.info(f"Triggering daily American analysis for {today_key}")
-                    already_sent.add(american_key)
-                    await send_daily_american_analysis()
 
             # ── Manual fixtures from fixtures.json ────────────────────────────
             import json
