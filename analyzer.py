@@ -1,4 +1,6 @@
 import os
+import json
+import re
 import httpx
 import psycopg2
 import logging
@@ -678,3 +680,136 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
     except Exception as e:
         print(f"[DEBUG] Unexpected error: {type(e).__name__}: {e}")
         return "Error inesperado. Revisa los logs del servidor."
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PICKS DIARIOS: analisis con probabilidad estructurada por condicion
+# (para el ranking global de "mejores picks del dia" en el scheduler)
+# ─────────────────────────────────────────────────────────────────────────
+
+PICKS_JSON_MARKER = "===PICKS_JSON==="
+
+
+def build_prompt_with_picks(home: str, away: str, conditions: list[dict], data: dict) -> str:
+    """Igual que build_prompt(), pero pide ademas un bloque JSON al final con
+    la probabilidad estimada (0-100) de cada condicion, para poder rankear
+    picks de todos los partidos del dia entre si."""
+    base_prompt = build_prompt(home, away, conditions, data)
+    picks_instruction = (
+        "\n\n----------------\n"
+        "Ademas de todo lo anterior, en una NUEVA linea aparte escribe EXACTAMENTE:\n"
+        f"{PICKS_JSON_MARKER}\n"
+        "seguido de un JSON valido en UNA sola linea (sin texto adicional, sin bloques de "
+        "codigo, sin comentarios) con este formato exacto:\n"
+        '[{"id":"btts","probability":82,"reason":"breve motivo en 1 frase basado SOLO en los datos reales"}]\n'
+        "Incluye SOLO las condiciones de la lista de arriba cuya probabilidad estimes en 60 o mas. "
+        "Usa exactamente el mismo 'id' que aparece en la lista de condiciones a evaluar. "
+        "El campo 'probability' es tu estimacion, en entero de 0 a 100, de que esa condicion se "
+        "cumpla en este partido concreto, basandote UNICAMENTE en los datos reales proporcionados "
+        "(nunca en la cuota de una casa de apuestas). "
+        "Si ninguna condicion alcanza 60, escribe exactamente: []"
+    )
+    return base_prompt + picks_instruction
+
+
+def _parse_picks_json(raw_text: str) -> tuple[str, list[dict]]:
+    """Separa la respuesta de Claude en (texto_informe, lista_de_picks).
+    Si falta el marcador o el JSON es invalido, devuelve el texto tal cual
+    y una lista vacia (nunca rompe el envio del informe normal)."""
+    if PICKS_JSON_MARKER not in raw_text:
+        return raw_text.strip(), []
+
+    report_part, _, json_part = raw_text.partition(PICKS_JSON_MARKER)
+    report_part = report_part.strip()
+    json_part = json_part.strip()
+
+    # Por si Claude envuelve el JSON en un bloque de codigo pese a la instruccion
+    json_part = re.sub(r"^```(json)?", "", json_part).strip()
+    json_part = re.sub(r"```$", "", json_part).strip()
+
+    try:
+        picks_raw = json.loads(json_part)
+        if not isinstance(picks_raw, list):
+            picks_raw = []
+    except (json.JSONDecodeError, ValueError):
+        print(f"[DEBUG] _parse_picks_json: JSON invalido: {json_part[:200]}")
+        picks_raw = []
+
+    cond_by_id = {c["id"]: c for c in DEFAULT_CONDITIONS}
+    clean_picks = []
+    for p in picks_raw:
+        if not isinstance(p, dict):
+            continue
+        pid = p.get("id")
+        if pid not in cond_by_id:
+            continue
+        try:
+            prob = int(p.get("probability"))
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= prob <= 100):
+            continue
+        clean_picks.append({
+            "id": pid,
+            "label": cond_by_id[pid]["label"],
+            "probability": prob,
+            "reason": str(p.get("reason", "")).strip(),
+        })
+
+    return report_part, clean_picks
+
+
+async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] | None = None) -> tuple[str, list[dict]]:
+    """Como analyze_match(), pero en la MISMA llamada a Claude (sin coste
+    adicional de API) devuelve tambien una lista de picks estructurados:
+    [{"id","label","probability","reason"}, ...] para las condiciones con
+    probabilidad estimada alta. Pensada para el ranking diario de picks."""
+    if conditions is None:
+        conditions = DEFAULT_CONDITIONS
+
+    data = await build_real_data(home, away)
+    prompt = build_prompt_with_picks(home, away, conditions, data)
+
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    body = {
+        "model": "claude-sonnet-5",
+        "max_tokens": 1700,
+        "messages": [{"role": "user", "content": prompt}],
+        "system": (
+            "Eres un analista deportivo experto en futbol. Respondes siempre en espanol. "
+            "Usas SOLO los datos reales proporcionados. "
+            "NUNCA inventes estadisticas, porcentajes ni promedios. "
+            "Si no tienes un dato, no lo menciones. "
+            "Formato Markdown Telegram. Respuestas concisas."
+        ),
+    }
+
+    if not data["api_ok"]:
+        body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 4}]
+
+    print(f"[DEBUG] Llamando a Anthropic (con picks). ANTHROPIC_API_KEY presente: {bool(ANTHROPIC_API_KEY)}")
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(ANTHROPIC_URL, headers=headers, json=body)
+            print(f"[DEBUG] Anthropic status_code: {r.status_code}")
+            r.raise_for_status()
+            data_r = r.json()
+            text_parts = [
+                block["text"]
+                for block in data_r.get("content", [])
+                if block.get("type") == "text"
+            ]
+            raw = "\n".join(text_parts) if text_parts else "No se pudo generar el analisis."
+            return _parse_picks_json(raw)
+    except httpx.HTTPStatusError as e:
+        print(f"[DEBUG] Anthropic HTTPStatusError: {e.response.status_code} - {e.response.text}")
+        return "Error al generar el analisis. Intentalo de nuevo en unos segundos.", []
+    except Exception as e:
+        print(f"[DEBUG] Unexpected error: {type(e).__name__}: {e}")
+        return "Error inesperado. Revisa los logs del servidor.", []
