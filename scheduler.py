@@ -12,7 +12,7 @@ import logging
 import httpx
 from datetime import datetime, timezone, timedelta
 
-from analyzer import analyze_match
+from analyzer import analyze_match, analyze_match_with_picks
 from bot_handler import send_message, split_message
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,10 @@ ALERT_HOURS      = int(os.getenv("ALERT_HOURS", "2"))
 CHAT_IDS_ENV     = os.getenv("NOTIFY_CHAT_IDS", "")
 APIFOOTBALL_KEY  = os.getenv("APIFOOTBALL_KEY", "888285a75737af52283245495c97c67a")
 APIFOOTBALL_URL  = "https://v3.football.api-sports.io"
+
+# ── Picks diarios (ranking de mayor probabilidad, cualquier mercado) ──────────
+MIN_CONFIANZA_PICK   = 70   # % minimo para que un pick aparezca en el ranking
+MAX_PICKS_MOSTRADOS  = 10   # techo de picks a mostrar (si hay menos, se muestran menos)
 
 # ── League definitions ─────────────────────────────────────────────────────────
 
@@ -93,6 +97,31 @@ async def get_todays_fixtures(league_id: int, season: int) -> list[dict]:
     return data.get("response", [])
 
 
+def format_picks_message(all_picks: list[dict], region_name: str) -> str:
+    """Construye el mensaje de ranking de picks del dia (independiente del
+    mercado): los que superen MIN_CONFIANZA_PICK, ordenados de mayor a menor
+    probabilidad, con un maximo de MAX_PICKS_MOSTRADOS."""
+    filtrados = [p for p in all_picks if p["probability"] >= MIN_CONFIANZA_PICK]
+
+    if not filtrados:
+        return (
+            f"🎯 *TOP PICKS DEL DÍA — {region_name.upper()}*\n"
+            f"_Ningún pick superó el {MIN_CONFIANZA_PICK}% de confianza hoy._"
+        )
+
+    filtrados.sort(key=lambda p: p["probability"], reverse=True)
+    top = filtrados[:MAX_PICKS_MOSTRADOS]
+
+    lines = [f"🎯 *TOP PICKS DEL DÍA — {region_name.upper()}* ({len(top)})\n"]
+    for i, p in enumerate(top, 1):
+        lines.append(
+            f"{i}. *{p['home']} vs {p['away']}* ({p['league']})\n"
+            f"   {p['label']}: *{p['probability']}%*\n"
+            f"   💡 {p['reason']}"
+        )
+    return "\n\n".join(lines)
+
+
 async def send_daily_analysis(leagues: dict, region_name: str, region_emoji: str):
     """Generic daily analysis sender for any set of leagues."""
     chat_ids = get_notify_chat_ids()
@@ -137,6 +166,8 @@ async def send_daily_analysis(leagues: dict, region_name: str, region_emoji: str
     for chat_id in chat_ids:
         await send_message(chat_id, header)
 
+    all_picks: list[dict] = []
+
     for i, fix in enumerate(all_fixtures, 1):
         home    = fix["home"]
         away    = fix["away"]
@@ -153,13 +184,16 @@ async def send_daily_analysis(leagues: dict, region_name: str, region_emoji: str
         logger.info(f"Analyzing [{i}/{len(all_fixtures)}]: {home} vs {away} ({league})")
 
         try:
-            report = await analyze_match(home, away)
+            report, picks = await analyze_match_with_picks(home, away)
             prefix = f"🏆 *{league}* · ⏰ {ko_str}h\n\n"
             full_report = prefix + report
             for chat_id in chat_ids:
                 for chunk in split_message(full_report):
                     await send_message(chat_id, chunk)
                     await asyncio.sleep(0.3)
+
+            for p in picks:
+                all_picks.append({**p, "home": home, "away": away, "league": league})
         except Exception as e:
             logger.error(f"Error analyzing {home} vs {away}: {e}")
             for chat_id in chat_ids:
@@ -174,6 +208,12 @@ async def send_daily_analysis(leagues: dict, region_name: str, region_emoji: str
             f"✅ *{region_name} — Análisis completado*\n"
             f"_{len(all_fixtures)} partidos procesados · Usa /stats para tu seguimiento_"
         )
+
+    picks_message = format_picks_message(all_picks, region_name)
+    for chat_id in chat_ids:
+        for chunk in split_message(picks_message):
+            await send_message(chat_id, chunk)
+            await asyncio.sleep(0.3)
 
 
 async def send_daily_ligas_con_datos_analysis():
