@@ -78,24 +78,26 @@ async def handle_update(data: dict):
         await send_message(chat_id, HELP_TEXT)
         return
 
-    # /asian — trigger daily Asian analysis manually
+    # /asian — trigger "Ligas con datos" analysis manually
+    # (se mantiene el nombre /asian por compatibilidad con lo que ya usabas,
+    # pero ahora mismo solo existe un bloque de ligas: "Ligas con datos")
     if text.startswith("/asian"):
         await send_message(chat_id,
-            "🌏 Lanzando análisis de ligas asiáticas...\n"
+            "📊 Lanzando análisis de ligas con datos...\n"
             "_Esto puede tardar varios minutos según los partidos del día._"
         )
-        from scheduler import send_daily_asian_analysis
-        await send_daily_asian_analysis()
+        from scheduler import send_daily_ligas_con_datos_analysis
+        await send_daily_ligas_con_datos_analysis()
         return
 
-    # /america — trigger daily American analysis manually
+    # /america — alias del mismo análisis (ver nota en /asian)
     if text.startswith("/america"):
         await send_message(chat_id,
-            "🌎 Lanzando análisis de ligas americanas...\n"
+            "📊 Lanzando análisis de ligas con datos...\n"
             "_Esto puede tardar varios minutos según los partidos del día._"
         )
-        from scheduler import send_daily_american_analysis
-        await send_daily_american_analysis()
+        from scheduler import send_daily_ligas_con_datos_analysis
+        await send_daily_ligas_con_datos_analysis()
         return
 
     # Bet commands
@@ -149,6 +151,6 @@ _Ejemplo: /apuesta España vs Francia ; +2.5 goles ; 1.80 ; 10_
 /web — enlace al dashboard web
 
 /help — esta ayuda
-/asian — análisis de todos los partidos asiáticos de hoy
-/america — análisis de todos los partidos americanos de hoy
+/asian — análisis manual de todos los partidos de hoy (ligas con datos)
+/america — alias de /asian (mismo análisis)
 """.strip()
