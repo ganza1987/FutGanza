@@ -26,7 +26,7 @@ DEFAULT_CONDITIONS = [
     {"id": "h2h_goals",    "label": "H2H: ambos equipos marcan",                    "weight": 5},
     {"id": "over15",       "label": "Mas de 1.5 goles en el partido",                "weight": 5},
     {"id": "home_goals",   "label": "Local promedia mas de 1.5 goles en casa",       "weight": 5},
-    {"id": "away_concede", "label": "Visitante encaja en todos sus partidos fuera",  "weight": 4},
+    {"id": "away_concede", "label": "Visitante encaja goles con frecuencia fuera",  "weight": 4},
 ]
 
 def avg(vals):
@@ -708,7 +708,17 @@ def build_prompt_with_picks(home: str, away: str, conditions: list[dict], data: 
         "El campo 'probability' es tu estimacion, en entero de 0 a 100, de que esa condicion se "
         "cumpla en este partido concreto, basandote UNICAMENTE en los datos reales proporcionados "
         "(nunca en la cuota de una casa de apuestas). "
-        "Si ninguna condicion alcanza 60, escribe exactamente: []"
+        "Si ninguna condicion alcanza 60, escribe exactamente: []\n\n"
+        "REGLAS CRITICAS para evitar contradicciones (revisalas antes de escribir el JSON):\n"
+        "1. Las cifras del 'reason' deben ser EXACTAMENTE las mismas que ya escribiste en el "
+        "informe de arriba (mismos decimales, mismo dato). Nunca redondees, aproximes ni "
+        "inventes una cifra nueva de memoria: copiala literalmente.\n"
+        "2. Antes de dar probabilidad >=60 a una condicion con umbral numerico (ej. 'mas de 1.5 "
+        "goles'), comprueba tu mismo si la cifra citada en el 'reason' SUPERA de verdad ese "
+        "umbral. Si no lo supera claramente, esa condicion NO puede tener probabilidad >=60.\n"
+        "3. No uses palabras absolutas ('todos', 'todas', 'siempre', 'nunca') en el 'reason' "
+        "salvo que sea literalmente el 100% de los partidos disponibles. Si es la mayoria pero "
+        "no todos, dilo como fraccion exacta (ej. '4 de 5 partidos')."
     )
     return base_prompt + picks_instruction
 
@@ -758,6 +768,52 @@ def _parse_picks_json(raw_text: str) -> tuple[str, list[dict]]:
         })
 
     return report_part, clean_picks
+
+
+# Numero minimo de partidos de historial (casa Y fuera) que exigimos antes de
+# dejar que un partido aporte picks al ranking diario. Con menos muestra que
+# esto, un pick de "alta confianza" es enganoso (ej. Kaizer Chiefs con 1 solo
+# partido de referencia) aunque el porcentaje que de Claude parezca solido.
+MIN_MATCHES_FOR_PICK = 3
+
+
+def _validate_picks_against_data(picks: list[dict], data: dict) -> list[dict]:
+    """Comprueba los picks contra los datos numericos YA CALCULADOS en Python
+    (no contra lo que Claude *dice* que calculo). Esto es una segunda barrera
+    independiente del prompt: aunque Claude marque una condicion como cumplida
+    por error, aqui se descarta si el propio dato no la respalda.
+
+    Tambien anota el tamano de muestra en cada pick para mostrarlo en el
+    mensaje final, y descarta TODOS los picks de un partido si la muestra de
+    partidos previos es demasiado pequena para fiarse."""
+    home_data = (data.get("home_data") or {}).get("home", {}) or {}
+    away_data = (data.get("away_data") or {}).get("away", {}) or {}
+    home_n = len(home_data.get("results") or [])
+    away_n = len(away_data.get("results") or [])
+
+    if home_n < MIN_MATCHES_FOR_PICK or away_n < MIN_MATCHES_FOR_PICK:
+        print(f"[DEBUG] _validate_picks_against_data: muestra insuficiente "
+              f"(casa={home_n}, fuera={away_n}, minimo={MIN_MATCHES_FOR_PICK}) - se descartan todos los picks")
+        return []
+
+    home_gf = home_data.get("gf")
+    away_gf = away_data.get("gf")
+    sample_str = f"{home_n} casa / {away_n} fuera"
+
+    validated = []
+    for p in picks:
+        pid = p["id"]
+        if pid == "home_goals" and home_gf is not None and home_gf <= 1.5:
+            print(f"[DEBUG] _validate_picks_against_data: pick 'home_goals' descartado "
+                  f"(dato real home_gf={home_gf}, no supera 1.5)")
+            continue
+        if pid == "away_goals" and away_gf is not None and away_gf <= 1.5:
+            print(f"[DEBUG] _validate_picks_against_data: pick 'away_goals' descartado "
+                  f"(dato real away_gf={away_gf}, no supera 1.5)")
+            continue
+        validated.append({**p, "sample": sample_str})
+
+    return validated
 
 
 async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] | None = None) -> tuple[str, list[dict]]:
@@ -829,7 +885,9 @@ async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] 
                     f"sin bloques de texto (stop_reason={stop_reason}, content_types={content_types})"
                 )
             raw = "\n".join(text_parts)
-            return _parse_picks_json(raw)
+            report, picks = _parse_picks_json(raw)
+            picks = _validate_picks_against_data(picks, data)
+            return report, picks
     except httpx.HTTPStatusError as e:
         print(f"[DEBUG] Anthropic HTTPStatusError: {e.response.status_code} - {e.response.text}")
         return await _fallback_to_plain_report(f"HTTPStatusError {e.response.status_code}")
