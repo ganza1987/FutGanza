@@ -22,6 +22,9 @@ CHAT_IDS_ENV     = os.getenv("NOTIFY_CHAT_IDS", "")
 APIFOOTBALL_KEY  = os.getenv("APIFOOTBALL_KEY", "888285a75737af52283245495c97c67a")
 APIFOOTBALL_URL  = "https://v3.football.api-sports.io"
 
+# ── Candado anti-solapamiento: evita que dos analisis corran a la vez ─────────
+_analysis_running = False
+
 # ── Picks diarios (ranking de mayor probabilidad, cualquier mercado) ──────────
 MIN_CONFIANZA_PICK   = 70   # % minimo para que un pick aparezca en el ranking
 MAX_PICKS_MOSTRADOS  = 10   # techo de picks a mostrar (si hay menos, se muestran menos)
@@ -123,6 +126,25 @@ def format_picks_message(all_picks: list[dict], region_name: str) -> str:
 
 
 async def send_daily_analysis(leagues: dict, region_name: str, region_emoji: str):
+    """Punto de entrada publico: evita que dos analisis se ejecuten en paralelo
+    (ej. un /picks manual mientras ya esta corriendo el analisis programado, o
+    un reintento duplicado de Telegram). Si ya hay uno en curso, avisa y sale."""
+    global _analysis_running
+    if _analysis_running:
+        logger.warning(f"send_daily_analysis({region_name}) omitido: ya hay un analisis en curso.")
+        for chat_id in get_notify_chat_ids():
+            await send_message(chat_id,
+                "⏳ Ya hay un análisis en curso ahora mismo. Espera a que termine antes de lanzar otro."
+            )
+        return
+    _analysis_running = True
+    try:
+        await _send_daily_analysis_impl(leagues, region_name, region_emoji)
+    finally:
+        _analysis_running = False
+
+
+async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoji: str):
     """Generic daily analysis sender for any set of leagues."""
     chat_ids = get_notify_chat_ids()
     if not chat_ids:
