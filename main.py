@@ -65,5 +65,8 @@ async def debug_apif():
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
-    await handle_update(data)
+    # Lanzamos el procesamiento en segundo plano y respondemos "ok" al instante.
+    # Si esperasemos aqui a que termine (ej. un /picks que tarda varios minutos),
+    # Telegram reintentaria el mismo mensaje por timeout, duplicando el analisis.
+    asyncio.create_task(handle_update(data))
     return {"ok": True}
