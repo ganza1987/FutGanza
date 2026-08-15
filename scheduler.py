@@ -117,9 +117,10 @@ def format_picks_message(all_picks: list[dict], region_name: str) -> str:
 
     lines = [f"🎯 *TOP PICKS DEL DÍA — {region_name.upper()}* ({len(top)})\n"]
     for i, p in enumerate(top, 1):
+        muestra = f" _(muestra: {p['sample']})_" if p.get("sample") else ""
         lines.append(
             f"{i}. *{p['home']} vs {p['away']}* ({p['league']})\n"
-            f"   {p['label']}: *{p['probability']}%*\n"
+            f"   {p['label']}: *{p['probability']}%*{muestra}\n"
             f"   💡 {p['reason']}"
         )
     return "\n\n".join(lines)
