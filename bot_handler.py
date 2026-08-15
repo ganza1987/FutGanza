@@ -78,7 +78,17 @@ async def handle_update(data: dict):
         await send_message(chat_id, HELP_TEXT)
         return
 
-    # /asian — trigger "Ligas con datos" analysis manually
+    # /picks — lanza el analisis completo (informes + ranking de picks) al momento
+    if text.startswith("/picks"):
+        await send_message(chat_id,
+            "📊 Lanzando análisis de hoy (informes + picks)...\n"
+            "_Esto puede tardar varios minutos según los partidos del día._"
+        )
+        from scheduler import send_daily_ligas_con_datos_analysis
+        await send_daily_ligas_con_datos_analysis()
+        return
+
+    # /asian — alias de /picks (nombre heredado, ver nota mas abajo)
     # (se mantiene el nombre /asian por compatibilidad con lo que ya usabas,
     # pero ahora mismo solo existe un bloque de ligas: "Ligas con datos")
     if text.startswith("/asian"):
@@ -151,6 +161,7 @@ _Ejemplo: /apuesta España vs Francia ; +2.5 goles ; 1.80 ; 10_
 /web — enlace al dashboard web
 
 /help — esta ayuda
-/asian — análisis manual de todos los partidos de hoy (ligas con datos)
-/america — alias de /asian (mismo análisis)
+/picks — analiza todos los partidos de hoy ahora mismo (informes + ranking de picks)
+/asian — alias de /picks (nombre heredado)
+/america — alias de /picks (nombre heredado)
 """.strip()
