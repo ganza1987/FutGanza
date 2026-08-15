@@ -794,6 +794,19 @@ async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] 
 
     print(f"[DEBUG] Llamando a Anthropic (con picks). ANTHROPIC_API_KEY presente: {bool(ANTHROPIC_API_KEY)}")
 
+    async def _fallback_to_plain_report(motivo: str) -> tuple[str, list[dict]]:
+        """Si la variante 'con picks' no consigue devolver texto util, caemos
+        a analyze_match() (la funcion original, probada y estable) para que
+        el informe del partido SIEMPRE llegue, aunque ese partido concreto se
+        quede sin picks. Mejor informe sin picks que ningun informe."""
+        print(f"[DEBUG] analyze_match_with_picks: fallback a analyze_match() por: {motivo}")
+        try:
+            report = await analyze_match(home, away, conditions)
+            return report, []
+        except Exception as e:
+            print(f"[DEBUG] Fallback a analyze_match() tambien fallo: {type(e).__name__}: {e}")
+            return "Error al generar el analisis. Intentalo de nuevo en unos segundos.", []
+
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             r = await client.post(ANTHROPIC_URL, headers=headers, json=body)
@@ -805,11 +818,19 @@ async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] 
                 for block in data_r.get("content", [])
                 if block.get("type") == "text"
             ]
-            raw = "\n".join(text_parts) if text_parts else "No se pudo generar el analisis."
+            if not text_parts:
+                stop_reason = data_r.get("stop_reason")
+                content_types = [b.get("type") for b in data_r.get("content", [])]
+                print(f"[DEBUG] Respuesta de Anthropic (con picks) sin texto. "
+                      f"stop_reason={stop_reason} content_types={content_types}")
+                return await _fallback_to_plain_report(
+                    f"sin bloques de texto (stop_reason={stop_reason}, content_types={content_types})"
+                )
+            raw = "\n".join(text_parts)
             return _parse_picks_json(raw)
     except httpx.HTTPStatusError as e:
         print(f"[DEBUG] Anthropic HTTPStatusError: {e.response.status_code} - {e.response.text}")
-        return "Error al generar el analisis. Intentalo de nuevo en unos segundos.", []
+        return await _fallback_to_plain_report(f"HTTPStatusError {e.response.status_code}")
     except Exception as e:
         print(f"[DEBUG] Unexpected error: {type(e).__name__}: {e}")
-        return "Error inesperado. Revisa los logs del servidor.", []
+        return await _fallback_to_plain_report(f"excepcion inesperada: {type(e).__name__}: {e}")
