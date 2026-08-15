@@ -72,6 +72,25 @@ def init_db():
         cur.execute("""
             ALTER TABLE analyses ADD COLUMN IF NOT EXISTS sport TEXT DEFAULT 'football';
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS picks_historial (
+                id             SERIAL PRIMARY KEY,
+                fecha          TEXT NOT NULL,
+                liga           TEXT NOT NULL,
+                sport          TEXT DEFAULT 'football',
+                equipo_local   TEXT NOT NULL,
+                equipo_visitante TEXT NOT NULL,
+                fixture_id     TEXT,
+                kickoff        TEXT,
+                condicion_id   TEXT NOT NULL,
+                condicion_label TEXT NOT NULL,
+                probabilidad   INTEGER NOT NULL,
+                muestra        TEXT,
+                resultado      TEXT DEFAULT 'pending',
+                verificado_en  TIMESTAMP,
+                created_at     TIMESTAMP DEFAULT NOW()
+            )
+        """)
     else:
         cur.executescript("""
             CREATE TABLE IF NOT EXISTS bets (
@@ -98,6 +117,23 @@ def init_db():
                 max_score  INTEGER,
                 sport      TEXT DEFAULT 'football',
                 created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS picks_historial (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha            TEXT NOT NULL,
+                liga             TEXT NOT NULL,
+                sport            TEXT DEFAULT 'football',
+                equipo_local     TEXT NOT NULL,
+                equipo_visitante TEXT NOT NULL,
+                fixture_id       TEXT,
+                kickoff          TEXT,
+                condicion_id     TEXT NOT NULL,
+                condicion_label  TEXT NOT NULL,
+                probabilidad     INTEGER NOT NULL,
+                muestra          TEXT,
+                resultado        TEXT DEFAULT 'pending',
+                verificado_en    TEXT,
+                created_at       TEXT DEFAULT (datetime('now'))
             );
         """)
     conn.commit()
@@ -301,3 +337,127 @@ def get_all_bets_web(sport=None) -> list:
     cur.close()
     conn.close()
     return rows
+
+
+# ── Picks (backtesting de precision) ───────────────────────────────────────────
+
+def add_pick(fecha, liga, equipo_local, equipo_visitante, fixture_id, kickoff,
+             condicion_id, condicion_label, probabilidad, muestra=None, sport="football") -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    if DB_TYPE == "postgres":
+        cur.execute(
+            "INSERT INTO picks_historial "
+            "(fecha, liga, sport, equipo_local, equipo_visitante, fixture_id, kickoff, "
+            " condicion_id, condicion_label, probabilidad, muestra) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (fecha, liga, sport, equipo_local, equipo_visitante, str(fixture_id) if fixture_id else None,
+             kickoff, condicion_id, condicion_label, probabilidad, muestra)
+        )
+        pick_id = cur.fetchone()[0]
+    else:
+        cur.execute(
+            "INSERT INTO picks_historial "
+            "(fecha, liga, sport, equipo_local, equipo_visitante, fixture_id, kickoff, "
+            " condicion_id, condicion_label, probabilidad, muestra) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (fecha, liga, sport, equipo_local, equipo_visitante, str(fixture_id) if fixture_id else None,
+             kickoff, condicion_id, condicion_label, probabilidad, muestra)
+        )
+        pick_id = cur.lastrowid
+    conn.commit()
+    cur.close()
+    conn.close()
+    return pick_id
+
+
+def get_pending_picks_to_verify(older_than_hours: int = 3, sport="football") -> list:
+    """Devuelve los picks pendientes cuyo kickoff ya paso hace mas de X horas
+    (tiempo suficiente para que el partido haya terminado), agrupables por
+    fixture_id para no repetir la misma consulta a la API por partido."""
+    conn = get_conn()
+    cur = conn.cursor()
+    if DB_TYPE == "postgres":
+        rows = _fetchall(cur,
+            "SELECT * FROM picks_historial WHERE resultado='pending' AND sport=%s "
+            "AND fixture_id IS NOT NULL AND kickoff IS NOT NULL "
+            "AND kickoff::timestamptz < NOW() - (%s || ' hours')::interval",
+            (sport, older_than_hours))
+    else:
+        rows = _fetchall(cur,
+            "SELECT * FROM picks_historial WHERE resultado='pending' AND sport=? "
+            "AND fixture_id IS NOT NULL AND kickoff IS NOT NULL "
+            "AND datetime(kickoff) < datetime('now', ?)",
+            (sport, f"-{older_than_hours} hours"))
+    cur.close()
+    conn.close()
+    return rows
+
+
+def update_pick_result(pick_id: int, resultado: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    if DB_TYPE == "postgres":
+        cur.execute(
+            "UPDATE picks_historial SET resultado=%s, verificado_en=NOW() WHERE id=%s",
+            (resultado, pick_id)
+        )
+    else:
+        cur.execute(
+            "UPDATE picks_historial SET resultado=?, verificado_en=datetime('now') WHERE id=?",
+            (resultado, pick_id)
+        )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_picks_accuracy_stats(sport="football") -> dict:
+    """Calcula el % de acierto global, por tipo de condicion y por rango de
+    confianza, usando solo los picks ya verificados (hit/miss)."""
+    conn = get_conn()
+    cur = conn.cursor()
+    if DB_TYPE == "postgres":
+        rows = _fetchall(cur,
+            "SELECT condicion_id, condicion_label, probabilidad, resultado "
+            "FROM picks_historial WHERE sport=%s AND resultado IN ('hit','miss')",
+            (sport,))
+    else:
+        rows = _fetchall(cur,
+            "SELECT condicion_id, condicion_label, probabilidad, resultado "
+            "FROM picks_historial WHERE sport=? AND resultado IN ('hit','miss')",
+            (sport,))
+    cur.close()
+    conn.close()
+
+    def _bucket(prob):
+        if prob >= 90: return "90-100%"
+        if prob >= 80: return "80-89%"
+        return "70-79%"
+
+    total_hit = sum(1 for r in rows if r["resultado"] == "hit")
+    total = len(rows)
+
+    por_condicion = {}
+    por_rango = {}
+    for r in rows:
+        cid = r["condicion_id"]
+        label = r["condicion_label"]
+        hit = 1 if r["resultado"] == "hit" else 0
+
+        c = por_condicion.setdefault(cid, {"label": label, "hit": 0, "total": 0})
+        c["hit"] += hit
+        c["total"] += 1
+
+        bucket = _bucket(r["probabilidad"])
+        b = por_rango.setdefault(bucket, {"hit": 0, "total": 0})
+        b["hit"] += hit
+        b["total"] += 1
+
+    return {
+        "total": total,
+        "total_hit": total_hit,
+        "win_rate": round(total_hit / total * 100, 1) if total else 0,
+        "por_condicion": por_condicion,
+        "por_rango": por_rango,
+    }
