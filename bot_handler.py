@@ -110,6 +110,11 @@ async def handle_update(data: dict):
         await send_daily_ligas_con_datos_analysis()
         return
 
+    # /precision — precision historica de los picks (backtesting)
+    if text.startswith("/precision"):
+        await send_message(chat_id, _format_precision_message())
+        return
+
     # Bet commands
     handled = await handle_bet_command(chat_id, text, send_message)
     if handled:
@@ -140,6 +145,59 @@ async def handle_update(data: dict):
     )
 
 
+def _format_precision_message() -> str:
+    """Construye el mensaje de /precision: acierto global, por tipo de
+    condicion y por rango de confianza, a partir del historial de picks
+    ya verificados contra el resultado real."""
+    from database import get_picks_accuracy_stats
+    try:
+        stats = get_picks_accuracy_stats()
+    except Exception as e:
+        logger.error(f"/precision: error leyendo estadisticas: {e}")
+        return "❌ No se pudo consultar la precisión ahora mismo. Inténtalo de nuevo en un momento."
+
+    if stats["total"] == 0:
+        return (
+            "📊 *Precisión de los picks*\n\n"
+            "Todavía no hay picks verificados contra un resultado real.\n"
+            "Los picks se comprueban automáticamente unas horas después de que "
+            "termine cada partido — vuelve a intentarlo en un día o dos."
+        )
+
+    lines = [
+        "📊 *Precisión de los picks*",
+        f"_Basado en {stats['total']} picks verificados_\n",
+        f"🎯 *Acierto global: {stats['win_rate']}%* ({stats['total_hit']}/{stats['total']})",
+    ]
+
+    if stats["por_rango"]:
+        lines.append("\n*Por rango de confianza:*")
+        for rango in ["90-100%", "80-89%", "70-79%"]:
+            r = stats["por_rango"].get(rango)
+            if not r:
+                continue
+            wr = round(r["hit"] / r["total"] * 100, 1) if r["total"] else 0
+            lines.append(f"  {rango} → {wr}% acierto ({r['hit']}/{r['total']})")
+
+    if stats["por_condicion"]:
+        lines.append("\n*Por tipo de condición:*")
+        condiciones_ordenadas = sorted(
+            stats["por_condicion"].items(),
+            key=lambda kv: kv[1]["hit"] / kv[1]["total"] if kv[1]["total"] else 0,
+            reverse=True,
+        )
+        for cid, c in condiciones_ordenadas:
+            wr = round(c["hit"] / c["total"] * 100, 1) if c["total"] else 0
+            lines.append(f"  {c['label']} → {wr}% ({c['hit']}/{c['total']})")
+
+    lines.append(
+        "\n_Nota: condiciones sobre forma/historial previo (no sobre el "
+        "resultado de ese partido) no se cuentan aquí por no ser verificables._"
+    )
+
+    return "\n".join(lines)
+
+
 HELP_TEXT = """
 🤖 *FutGanza Bot*
 
@@ -162,6 +220,7 @@ _Ejemplo: /apuesta España vs Francia ; +2.5 goles ; 1.80 ; 10_
 
 /help — esta ayuda
 /picks — analiza todos los partidos de hoy ahora mismo (informes + ranking de picks)
+/precision — precisión histórica de los picks (backtesting)
 /asian — alias de /picks (nombre heredado)
 /america — alias de /picks (nombre heredado)
 """.strip()
