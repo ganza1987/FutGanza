@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 
 from analyzer import analyze_match, analyze_match_with_picks
 from bot_handler import send_message, split_message
+from database import add_pick, get_pending_picks_to_verify, update_pick_result
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,84 @@ def format_picks_message(all_picks: list[dict], region_name: str) -> str:
     return "\n\n".join(lines)
 
 
+# ── Verificacion automatica de picks (backtesting) ─────────────────────────────
+
+# Solo estas condiciones describen un resultado DE ESTE partido concreto y por
+# tanto se pueden verificar contra el marcador final. Las demas (forma
+# reciente, invicto, H2H...) describen datos PREVIOS al partido, no algo que
+# "acierte o falle" con el resultado de hoy, asi que se excluyen de las
+# estadisticas de precision (se marcan como 'no_verificable').
+VERIFIABLE_CONDITIONS = {"btts", "over25", "over15", "home_goals", "away_goals"}
+
+
+def _evaluate_condition(condicion_id: str, home_goals: int, away_goals: int) -> bool | None:
+    """Compara la condicion contra el marcador final real. Devuelve True
+    (acierto), False (fallo) o None si la condicion no es evaluable asi."""
+    if condicion_id == "btts":
+        return home_goals > 0 and away_goals > 0
+    if condicion_id == "over25":
+        return (home_goals + away_goals) > 2.5
+    if condicion_id == "over15":
+        return (home_goals + away_goals) > 1.5
+    if condicion_id == "home_goals":
+        return home_goals > 1.5
+    if condicion_id == "away_goals":
+        return away_goals > 1.5
+    return None
+
+
+async def verify_pending_picks():
+    """Revisa los picks pendientes cuyo partido ya deberia haber acabado
+    (kickoff + 3h de margen) contra el resultado real en API-Football, y
+    actualiza hit/miss en la base de datos. Se llama al principio de cada
+    ejecucion programada para ir poniendose al dia."""
+    try:
+        pendientes = get_pending_picks_to_verify(older_than_hours=3)
+    except Exception as e:
+        logger.error(f"verify_pending_picks: error leyendo pendientes: {e}")
+        return
+
+    if not pendientes:
+        return
+
+    fixture_ids = {p["fixture_id"] for p in pendientes if p["fixture_id"]}
+    resultados_por_fixture: dict[str, tuple[int, int]] = {}
+    for fid in fixture_ids:
+        data = await apif_get("fixtures", {"id": fid})
+        response = data.get("response", [])
+        if not response:
+            continue
+        fixture_data = response[0]
+        status = fixture_data.get("fixture", {}).get("status", {}).get("short")
+        if status != "FT":
+            continue  # aun no ha terminado (aplazado, en curso...) - lo dejamos pendiente
+        gh = fixture_data.get("goals", {}).get("home")
+        ga = fixture_data.get("goals", {}).get("away")
+        if gh is None or ga is None:
+            continue
+        resultados_por_fixture[str(fid)] = (gh, ga)
+        await asyncio.sleep(0.3)
+
+    revisados = 0
+    for p in pendientes:
+        resultado_partido = resultados_por_fixture.get(str(p["fixture_id"]))
+        if resultado_partido is None:
+            continue
+        gh, ga = resultado_partido
+        try:
+            if p["condicion_id"] not in VERIFIABLE_CONDITIONS:
+                update_pick_result(p["id"], "no_verificable")
+            else:
+                acierto = _evaluate_condition(p["condicion_id"], gh, ga)
+                update_pick_result(p["id"], "hit" if acierto else "miss")
+            revisados += 1
+        except Exception as e:
+            logger.error(f"verify_pending_picks: error actualizando pick {p['id']}: {e}")
+
+    logger.info(f"verify_pending_picks: {revisados}/{len(pendientes)} picks pendientes revisados "
+                f"({len(resultados_por_fixture)} partidos con resultado final disponible)")
+
+
 async def send_daily_analysis(leagues: dict, region_name: str, region_emoji: str):
     """Punto de entrada publico: evita que dos analisis se ejecuten en paralelo
     (ej. un /picks manual mientras ya esta corriendo el analisis programado, o
@@ -152,6 +231,8 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
         logger.warning("No NOTIFY_CHAT_IDS configured.")
         return
 
+    await verify_pending_picks()
+
     season = datetime.now(timezone.utc).year
     all_fixtures = []
 
@@ -163,11 +244,13 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
             home = fix["teams"]["home"]["name"]
             away = fix["teams"]["away"]["name"]
             kickoff = fix["fixture"]["date"]
+            fixture_id = fix["fixture"]["id"]
             all_fixtures.append({
                 "home": home,
                 "away": away,
                 "league": league_name,
                 "kickoff": kickoff,
+                "fixture_id": fixture_id,
             })
         await asyncio.sleep(0.5)
 
@@ -192,10 +275,11 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
     all_picks: list[dict] = []
 
     for i, fix in enumerate(all_fixtures, 1):
-        home    = fix["home"]
-        away    = fix["away"]
-        league  = fix["league"]
-        kickoff = fix["kickoff"]
+        home       = fix["home"]
+        away       = fix["away"]
+        league     = fix["league"]
+        kickoff    = fix["kickoff"]
+        fixture_id = fix["fixture_id"]
 
         try:
             ko = datetime.fromisoformat(kickoff.replace("Z", "+00:00"))
@@ -217,6 +301,16 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
 
             for p in picks:
                 all_picks.append({**p, "home": home, "away": away, "league": league})
+                try:
+                    add_pick(
+                        fecha=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                        liga=league, equipo_local=home, equipo_visitante=away,
+                        fixture_id=fixture_id, kickoff=kickoff,
+                        condicion_id=p["id"], condicion_label=p["label"],
+                        probabilidad=p["probability"], muestra=p.get("sample"),
+                    )
+                except Exception as e:
+                    logger.error(f"No se pudo guardar el pick en la BD ({home} vs {away}, {p['id']}): {e}")
         except Exception as e:
             logger.error(f"Error analyzing {home} vs {away}: {e}")
             for chat_id in chat_ids:
