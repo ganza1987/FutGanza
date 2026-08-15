@@ -645,6 +645,7 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
     body = {
         "model": "claude-sonnet-5",
         "max_tokens": 1500,
+        "thinking": {"type": "disabled"},
         "messages": [{"role": "user", "content": prompt}],
         "system": (
             "Eres un analista deportivo experto en futbol. Respondes siempre en espanol. "
@@ -779,6 +780,7 @@ async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] 
     body = {
         "model": "claude-sonnet-5",
         "max_tokens": 1700,
+        "thinking": {"type": "disabled"},
         "messages": [{"role": "user", "content": prompt}],
         "system": (
             "Eres un analista deportivo experto en futbol. Respondes siempre en espanol. "
