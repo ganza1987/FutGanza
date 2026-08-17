@@ -91,6 +91,21 @@ def init_db():
                 created_at     TIMESTAMP DEFAULT NOW()
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS cuotas (
+                id               SERIAL PRIMARY KEY,
+                fixture_id       TEXT NOT NULL,
+                liga_id          INT,
+                bookmaker_id     INT,
+                bookmaker_nombre TEXT,
+                markets          JSONB,
+                capturada_en     TIMESTAMP DEFAULT NOW(),
+                UNIQUE(fixture_id, bookmaker_id, capturada_en)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_cuotas_fixture_id ON cuotas (fixture_id)
+        """)
     else:
         cur.executescript("""
             CREATE TABLE IF NOT EXISTS bets (
@@ -134,6 +149,15 @@ def init_db():
                 resultado        TEXT DEFAULT 'pending',
                 verificado_en    TEXT,
                 created_at       TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS cuotas (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                fixture_id       TEXT NOT NULL,
+                liga_id          INT,
+                bookmaker_id     INT,
+                bookmaker_nombre TEXT,
+                markets          TEXT,
+                capturada_en     TEXT DEFAULT (datetime('now'))
             );
         """)
     conn.commit()
