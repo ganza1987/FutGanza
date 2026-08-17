@@ -246,6 +246,20 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
             away = fix["teams"]["away"]["name"]
             kickoff = fix["fixture"]["date"]
             fixture_id = fix["fixture"]["id"]
+
+            # Descarta partidos cuyo kickoff ya paso respecto al momento en
+            # que corre este analisis. Sin este filtro, un partido de la
+            # noche anterior en EEUU (ej. MLS) puede caer dentro del "dia
+            # UTC" de hoy pero ya estar en curso o terminado cuando el
+            # scheduler corre a las 06:00 hora Espana (bug de horarios MLS).
+            try:
+                kickoff_dt = datetime.fromisoformat(kickoff.replace("Z", "+00:00"))
+            except Exception:
+                kickoff_dt = None
+            if kickoff_dt is not None and kickoff_dt <= datetime.now(timezone.utc):
+                logger.info(f"Omitiendo {home} vs {away} ({league_name}): kickoff {kickoff} ya paso.")
+                continue
+
             all_fixtures.append({
                 "home": home,
                 "away": away,
