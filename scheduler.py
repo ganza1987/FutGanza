@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 from analyzer import analyze_match, analyze_match_with_picks
 from bot_handler import send_message, split_message
 from database import add_pick, get_pending_picks_to_verify, update_pick_result
+from odds_handler import fetch_and_store_odds
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,7 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
                 "kickoff": kickoff,
                 "fixture_id": fixture_id,
             })
+            await fetch_and_store_odds(fixture_id, league_id)
         await asyncio.sleep(0.5)
 
     if not all_fixtures:
@@ -407,3 +409,4 @@ async def start_scheduler():
             logger.error(f"Scheduler error: {e}")
 
         await asyncio.sleep(60)
+
