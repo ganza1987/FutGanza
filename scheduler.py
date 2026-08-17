@@ -102,6 +102,46 @@ async def get_todays_fixtures(league_id: int, season: int) -> list[dict]:
     return data.get("response", [])
 
 
+async def get_upcoming_fixtures(league_id: int, season: int, hours_ahead: int = 30) -> list[dict]:
+    """Partidos de una liga en las proximas `hours_ahead` horas desde ahora
+    (30h por defecto).
+
+    Sustituye a get_todays_fixtures() como fuente para el analisis diario.
+    El filtro por fecha UTC exacta (date=hoy) dejaba un hueco real con
+    ligas de horario nocturno EEUU como MLS: un partido a las 02:00 hora
+    Espana no aparecia ni en el analisis de las 12:30 del dia anterior
+    (porque esa hora cae en "manana" en UTC) ni en el de las 06:00
+    (porque para entonces ya habia empezado). Ver bug de horarios MLS.
+
+    La API de API-Football solo filtra por dia (from/to), no por hora
+    exacta, asi que pedimos el rango de dias que cubre la ventana y
+    afinamos por hora exacta aqui, quedandonos solo con los partidos
+    cuyo kickoff cae entre ahora y ahora+hours_ahead.
+    """
+    now = datetime.now(timezone.utc)
+    window_end = now + timedelta(hours=hours_ahead)
+    data = await apif_get("fixtures", {
+        "league": league_id,
+        "season": season,
+        "from": now.strftime("%Y-%m-%d"),
+        "to": window_end.strftime("%Y-%m-%d"),
+    })
+    response = data.get("response", [])
+
+    filtered = []
+    for fix in response:
+        kickoff = fix.get("fixture", {}).get("date")
+        if not kickoff:
+            continue
+        try:
+            kickoff_dt = datetime.fromisoformat(kickoff.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if now <= kickoff_dt <= window_end:
+            filtered.append(fix)
+    return filtered
+
+
 def format_picks_message(all_picks: list[dict], region_name: str) -> str:
     """Construye el mensaje de ranking de picks del dia (independiente del
     mercado): los que superen MIN_CONFIANZA_PICK, ordenados de mayor a menor
@@ -240,7 +280,7 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
     logger.info(f"Fetching {region_name} fixtures for {datetime.now(timezone.utc).strftime('%Y-%m-%d')}...")
 
     for league_id, league_name in leagues.items():
-        fixtures = await get_todays_fixtures(league_id, season)
+        fixtures = await get_upcoming_fixtures(league_id, season)
         for fix in fixtures:
             home = fix["teams"]["home"]["name"]
             away = fix["teams"]["away"]["name"]
