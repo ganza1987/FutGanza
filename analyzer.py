@@ -720,7 +720,15 @@ def build_prompt_with_picks(home: str, away: str, conditions: list[dict], data: 
         "umbral. Si no lo supera claramente, esa condicion NO puede tener probabilidad >=60.\n"
         "3. No uses palabras absolutas ('todos', 'todas', 'siempre', 'nunca') en el 'reason' "
         "salvo que sea literalmente el 100% de los partidos disponibles. Si es la mayoria pero "
-        "no todos, dilo como fraccion exacta (ej. '4 de 5 partidos')."
+        "no todos, dilo como fraccion exacta (ej. '4 de 5 partidos').\n"
+        "4. Para 'corners_over85' y 'cards_over35': estos mercados estan validados por "
+        "backtesting propio (sobre mas de 1000 partidos reales) y calibran tan bien como "
+        "'Mas de 2.5 goles'. Si la suma de las medias de corners (o tarjetas) de ambos equipos "
+        "supera el umbral (8.5 o 3.5 respectivamente), trata eso como una senal fiable: no seas "
+        "mas conservador con estas dos condiciones que con las de goles. Asigna probabilidad "
+        "65-80 cuando la suma supere el umbral con margen razonable (mas de un 5%), salvo que "
+        "algo concreto en los datos de ESE partido (muestra muy pequena, equipo claramente "
+        "atipico) te haga dudar."
     )
     return base_prompt + picks_instruction
 
