@@ -504,8 +504,14 @@ async def build_real_data(home_name: str, away_name: str) -> dict:
 
 # Prompt builder
 
-def build_prompt(home: str, away: str, conditions: list[dict], data: dict) -> str:
+def build_prompt(home: str, away: str, conditions: list[dict], data: dict, match_date: str | None = None) -> str:
     now = datetime.now().strftime("%d/%m/%Y")
+    # Fecha mostrada junto al nombre de la competicion: debe ser la fecha REAL
+    # del kickoff del partido, no la fecha en que corre el analisis. Con la
+    # ventana de 30h (ver get_upcoming_fixtures en scheduler.py) un partido
+    # analizado "hoy" puede jugarse manana, y mostrar "hoy" ahi es enganoso
+    # (bug reportado: "Dalian Zhixing" no aparecia en la agenda del dia).
+    display_date = match_date or now
     max_pts = sum(c["weight"] for c in conditions)
     hd = data.get("home_data") or {}
     ad = data.get("away_data") or {}
@@ -607,7 +613,7 @@ def build_prompt(home: str, away: str, conditions: list[dict], data: dict) -> st
     prompt_parts.append("FORMATO EXACTO:")
     prompt_parts.append("")
     prompt_parts.append(confidence_banner + f"*{home.upper()} vs {away.upper()}*")
-    prompt_parts.append(f"_[competicion] - {now}_")
+    prompt_parts.append(f"_[competicion] - {display_date}_")
     prompt_parts.append("")
     prompt_parts.append(f"*{home}* - [resultados x5 casa en una linea]")
     prompt_parts.append("Goles casa: X marc / X enc | Corners: X | Disparos: X | Tarj: X (omite si no hay dato)")
@@ -630,13 +636,13 @@ def build_prompt(home: str, away: str, conditions: list[dict], data: dict) -> st
     return "\n".join(prompt_parts)
 
 
-async def analyze_match(home: str, away: str, conditions: list[dict] | None = None) -> str:
+async def analyze_match(home: str, away: str, conditions: list[dict] | None = None, match_date: str | None = None) -> str:
     if conditions is None:
         conditions = DEFAULT_CONDITIONS
 
     data = await build_real_data(home, away)
 
-    prompt = build_prompt(home, away, conditions, data)
+    prompt = build_prompt(home, away, conditions, data, match_date)
 
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
@@ -693,11 +699,11 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
 PICKS_JSON_MARKER = "===PICKS_JSON==="
 
 
-def build_prompt_with_picks(home: str, away: str, conditions: list[dict], data: dict) -> str:
+def build_prompt_with_picks(home: str, away: str, conditions: list[dict], data: dict, match_date: str | None = None) -> str:
     """Igual que build_prompt(), pero pide ademas un bloque JSON al final con
     la probabilidad estimada (0-100) de cada condicion, para poder rankear
     picks de todos los partidos del dia entre si."""
-    base_prompt = build_prompt(home, away, conditions, data)
+    base_prompt = build_prompt(home, away, conditions, data, match_date)
     picks_instruction = (
         "\n\n----------------\n"
         "Ademas de todo lo anterior, en una NUEVA linea aparte escribe EXACTAMENTE:\n"
@@ -840,16 +846,20 @@ def _validate_picks_against_data(picks: list[dict], data: dict) -> list[dict]:
     return validated
 
 
-async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] | None = None) -> tuple[str, list[dict]]:
+async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] | None = None, match_date: str | None = None) -> tuple[str, list[dict]]:
     """Como analyze_match(), pero en la MISMA llamada a Claude (sin coste
     adicional de API) devuelve tambien una lista de picks estructurados:
     [{"id","label","probability","reason"}, ...] para las condiciones con
-    probabilidad estimada alta. Pensada para el ranking diario de picks."""
+    probabilidad estimada alta. Pensada para el ranking diario de picks.
+
+    match_date (opcional): fecha del kickoff en formato DD/MM/YYYY, ya
+    convertida a hora Espana por quien llama (ver scheduler.py). Si no se
+    pasa, el informe usa la fecha de hoy como antes."""
     if conditions is None:
         conditions = DEFAULT_CONDITIONS
 
     data = await build_real_data(home, away)
-    prompt = build_prompt_with_picks(home, away, conditions, data)
+    prompt = build_prompt_with_picks(home, away, conditions, data, match_date)
 
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
