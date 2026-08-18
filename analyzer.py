@@ -27,6 +27,8 @@ DEFAULT_CONDITIONS = [
     {"id": "over15",       "label": "Mas de 1.5 goles en el partido",                "weight": 5},
     {"id": "home_goals",   "label": "Local promedia mas de 1.5 goles en casa",       "weight": 5},
     {"id": "away_concede", "label": "Visitante encaja goles con frecuencia fuera",  "weight": 4},
+    {"id": "corners_over85", "label": "Mas de 8.5 corners en el partido",           "weight": 6},
+    {"id": "cards_over35",   "label": "Mas de 3.5 tarjetas en el partido",          "weight": 6},
 ]
 
 def avg(vals):
@@ -798,6 +800,10 @@ def _validate_picks_against_data(picks: list[dict], data: dict) -> list[dict]:
 
     home_gf = home_data.get("gf")
     away_gf = away_data.get("gf")
+    home_corners = home_data.get("corners")
+    away_corners = away_data.get("corners")
+    home_cards = home_data.get("cards")
+    away_cards = away_data.get("cards")
     sample_str = f"{home_n} casa / {away_n} fuera"
 
     validated = []
@@ -810,6 +816,16 @@ def _validate_picks_against_data(picks: list[dict], data: dict) -> list[dict]:
         if pid == "away_goals" and away_gf is not None and away_gf <= 1.5:
             print(f"[DEBUG] _validate_picks_against_data: pick 'away_goals' descartado "
                   f"(dato real away_gf={away_gf}, no supera 1.5)")
+            continue
+        if pid == "corners_over85" and home_corners is not None and away_corners is not None \
+                and (home_corners + away_corners) < 8.5:
+            print(f"[DEBUG] _validate_picks_against_data: pick 'corners_over85' descartado "
+                  f"(dato real home_corners+away_corners={home_corners + away_corners}, no supera 8.5)")
+            continue
+        if pid == "cards_over35" and home_cards is not None and away_cards is not None \
+                and (home_cards + away_cards) < 3.5:
+            print(f"[DEBUG] _validate_picks_against_data: pick 'cards_over35' descartado "
+                  f"(dato real home_cards+away_cards={home_cards + away_cards}, no supera 3.5)")
             continue
         validated.append({**p, "sample": sample_str})
 
