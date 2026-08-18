@@ -133,7 +133,17 @@ async def get_upcoming_fixtures(league_id: int, season: int, hours_ahead: int = 
     })
     response = data.get("response", [])
     if diag is not None:
-        diag[league_id] = {"raw": len(response), "error": data.get("_error")}
+        # API-Football, al agotar la cuota diaria, no da un error HTTP: responde
+        # 200 OK con "results": 0 y un aviso dentro de su propio campo "errors"
+        # (p.ej. {"requests": "You have reached the request limit..."}). Sin
+        # esto, apif_get lo ve como una respuesta valida y vacia, indistinguible
+        # de "no hay partidos de verdad" (bug reportado: /picks decia "no hay
+        # partidos" en las 10 ligas a la vez sin ningun error visible).
+        soft_errors = data.get("errors")
+        diag[league_id] = {
+            "raw": len(response),
+            "error": data.get("_error") or (soft_errors if soft_errors else None),
+        }
 
     filtered = []
     for fix in response:
@@ -324,7 +334,7 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
         for league_id, league_name in leagues.items():
             info = diag.get(league_id, {})
             if info.get("error"):
-                diag_lines.append(f"- {league_name}: ERROR ({info['error'][:60]})")
+                diag_lines.append(f"- {league_name}: ERROR ({str(info['error'])[:80]})")
             else:
                 diag_lines.append(f"- {league_name}: {info.get('raw', '?')} partidos en bruto de la API")
         diag_text = "\n".join(diag_lines)
