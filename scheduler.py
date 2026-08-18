@@ -88,7 +88,7 @@ async def apif_get(endpoint: str, params: dict) -> dict:
             return r.json()
     except Exception as e:
         logger.warning(f"apif_get({endpoint}): {e}")
-        return {}
+        return {"_error": str(e)}
 
 
 async def get_todays_fixtures(league_id: int, season: int) -> list[dict]:
@@ -102,7 +102,7 @@ async def get_todays_fixtures(league_id: int, season: int) -> list[dict]:
     return data.get("response", [])
 
 
-async def get_upcoming_fixtures(league_id: int, season: int, hours_ahead: int = 30) -> list[dict]:
+async def get_upcoming_fixtures(league_id: int, season: int, hours_ahead: int = 30, diag: dict | None = None) -> list[dict]:
     """Partidos de una liga en las proximas `hours_ahead` horas desde ahora
     (30h por defecto).
 
@@ -117,6 +117,11 @@ async def get_upcoming_fixtures(league_id: int, season: int, hours_ahead: int = 
     exacta, asi que pedimos el rango de dias que cubre la ventana y
     afinamos por hora exacta aqui, quedandonos solo con los partidos
     cuyo kickoff cae entre ahora y ahora+hours_ahead.
+
+    diag (opcional): si se pasa un dict, se rellena con
+    diag[league_id] = {"raw": N, "error": mensaje_o_None} para poder
+    diagnosticar directamente en el mensaje de Telegram si un dia no
+    aparecen partidos (sin depender de bucear en los logs de Render).
     """
     now = datetime.now(timezone.utc)
     window_end = now + timedelta(hours=hours_ahead)
@@ -127,6 +132,8 @@ async def get_upcoming_fixtures(league_id: int, season: int, hours_ahead: int = 
         "to": window_end.strftime("%Y-%m-%d"),
     })
     response = data.get("response", [])
+    if diag is not None:
+        diag[league_id] = {"raw": len(response), "error": data.get("_error")}
 
     filtered = []
     for fix in response:
@@ -276,11 +283,12 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
 
     season = datetime.now(timezone.utc).year
     all_fixtures = []
+    diag: dict = {}
 
     logger.info(f"Fetching {region_name} fixtures for {datetime.now(timezone.utc).strftime('%Y-%m-%d')}...")
 
     for league_id, league_name in leagues.items():
-        fixtures = await get_upcoming_fixtures(league_id, season)
+        fixtures = await get_upcoming_fixtures(league_id, season, diag=diag)
         for fix in fixtures:
             home = fix["teams"]["home"]["name"]
             away = fix["teams"]["away"]["name"]
@@ -312,10 +320,20 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
 
     if not all_fixtures:
         logger.info(f"No {region_name} fixtures today.")
+        diag_lines = []
+        for league_id, league_name in leagues.items():
+            info = diag.get(league_id, {})
+            if info.get("error"):
+                diag_lines.append(f"- {league_name}: ERROR ({info['error'][:60]})")
+            else:
+                diag_lines.append(f"- {league_name}: {info.get('raw', '?')} partidos en bruto de la API")
+        diag_text = "\n".join(diag_lines)
         for chat_id in chat_ids:
             await send_message(chat_id,
                 f"{region_emoji} *Análisis diario — {region_name}*\n"
-                f"_No hay partidos programados hoy._"
+                f"_No hay partidos programados hoy._\n\n"
+                f"🔧 _Diagnóstico (por si esto no cuadra con lo que esperabas):_\n"
+                f"{diag_text}"
             )
         return
 
