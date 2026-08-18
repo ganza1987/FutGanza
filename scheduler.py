@@ -341,14 +341,17 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
             ko = datetime.fromisoformat(kickoff.replace("Z", "+00:00"))
             spain_ko = ko + timedelta(hours=spain_offset())
             ko_str = spain_ko.strftime("%H:%M")
+            ko_date_str = spain_ko.strftime("%d/%m/%Y")
         except Exception:
             ko_str = "?"
+            ko_date_str = None
 
         logger.info(f"Analyzing [{i}/{len(all_fixtures)}]: {home} vs {away} ({league})")
 
         try:
-            report, picks = await analyze_match_with_picks(home, away)
-            prefix = f"🏆 *{league}* · ⏰ {ko_str}h\n\n"
+            report, picks = await analyze_match_with_picks(home, away, match_date=ko_date_str)
+            fecha_line = f" ({ko_date_str})" if ko_date_str else ""
+            prefix = f"🏆 *{league}* · ⏰ {ko_str}h{fecha_line}\n\n"
             full_report = prefix + report
             for chat_id in chat_ids:
                 for chunk in split_message(full_report):
@@ -463,4 +466,3 @@ async def start_scheduler():
             logger.error(f"Scheduler error: {e}")
 
         await asyncio.sleep(60)
-
