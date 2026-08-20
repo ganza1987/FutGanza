@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import math
 import httpx
 import psycopg2
 import logging
@@ -846,6 +847,214 @@ def _validate_picks_against_data(picks: list[dict], data: dict) -> list[dict]:
     return validated
 
 
+# ---------------------------------------------------------------------------
+# Motor estadistico validado: Poisson (ataque/defensa) + calibracion Platt
+# ---------------------------------------------------------------------------
+# Los coeficientes de abajo (slope, intercept) se calcularon y VALIDARON con
+# un split temporal estricto de 3 pasos, usando los partidos historicos
+# (2023-2025) acumulados en la tabla "partidos":
+#   1. Fuerza de ataque/defensa de cada equipo -> calculada SOLO con 2023-2024
+#   2. Calibracion de Platt -> ajustada SOLO con 2025 (datos que el paso 1
+#      nunca vio)
+#   3. Prueba ciega -> comprobada contra 2026 (datos que ni el paso 1 ni el
+#      paso 2 vieron nunca)
+# Los tres mercados de abajo pasaron esa prueba ciega con una mejora clara
+# del error de calibracion. Ver sesion de analisis "corners/goles/btts"
+# para el detalle completo. Tarjetas y "away_goals" NO se incluyen aqui
+# porque no superaron esa misma prueba con suficiente fiabilidad.
+PLATT_BTTS = (0.1079, 0.3977)        # (slope, intercept)
+PLATT_OVER25 = (0.2178, 0.4273)
+PLATT_CORNERS85 = (0.2576, 0.5763)
+
+LIGA_ID_SIN_CORNERS = 14  # Urvalsdeild (Islandia): nunca ha tenido datos de corners/tarjetas
+
+
+def _platt(p_raw: float, slope: float, intercept: float) -> float:
+    """Aplica la recalibracion de Platt (regresion logistica de calibracion)
+    a una probabilidad Poisson 'cruda'. p_raw se recorta a [0.01, 0.99] para
+    que el logit no explote en los extremos."""
+    p_raw = min(max(p_raw, 0.01), 0.99)
+    logit = math.log(p_raw / (1 - p_raw))
+    return 1 / (1 + math.exp(-(intercept + slope * logit)))
+
+
+def _poisson_cdf_corners_le8(lt: float) -> float:
+    """P(corners totales <= 8) via suma directa de la Poisson pmf, k=0..8."""
+    pmf = math.exp(-lt)
+    cdf = pmf
+    for k in range(1, 9):
+        pmf *= lt / k
+        cdf += pmf
+    return cdf
+
+
+def poisson_calibrated_probs(home: str, away: str) -> dict:
+    """Calcula BTTS, Over 2.5 goles y Over 8.5 corners con el modelo Poisson
+    de ataque/defensa (calculado sobre TODO el historico disponible en la
+    tabla partidos) y les aplica la calibracion de Platt validada arriba.
+
+    Devuelve un dict {condicion_id: probabilidad_0_a_100}. Una condicion se
+    omite del dict si no hay datos suficientes para calcularla (equipo con
+    pocos partidos en la BD, o liga sin datos de corners) -- en ese caso el
+    pick de esa condicion sigue dependiendo de la estimacion de Claude, sin
+    override.
+    """
+    result: dict[str, float] = {}
+    if not DATABASE_URL:
+        return result
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT liga_id, count(*) as n FROM (
+                SELECT liga_id FROM partidos WHERE equipo_local ILIKE %s
+                UNION ALL
+                SELECT liga_id FROM partidos WHERE equipo_visitante ILIKE %s
+            ) t GROUP BY liga_id ORDER BY n DESC LIMIT 1
+        """, (f"%{home}%", f"%{home}%"))
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            return result
+        liga_id = row[0]
+
+        # --- Goles: BTTS y Over 2.5 ---
+        cur.execute(
+            "SELECT avg(goles_local), avg(goles_visitante) FROM partidos WHERE liga_id=%s",
+            (liga_id,)
+        )
+        avg_home_g, avg_away_g = cur.fetchone()
+
+        def _goal_strengths(team):
+            cur.execute("""
+                SELECT avg(goles_local), avg(goles_visitante), count(*)
+                FROM partidos WHERE liga_id=%s AND equipo_local ILIKE %s
+            """, (liga_id, f"%{team}%"))
+            gf_h, ga_h, n_h = cur.fetchone()
+            cur.execute("""
+                SELECT avg(goles_visitante), avg(goles_local), count(*)
+                FROM partidos WHERE liga_id=%s AND equipo_visitante ILIKE %s
+            """, (liga_id, f"%{team}%"))
+            gf_a, ga_a, n_a = cur.fetchone()
+            if gf_h is None or gf_a is None or n_h < 3 or n_a < 3:
+                return None
+            return float(gf_h), float(ga_h), float(gf_a), float(ga_a)
+
+        if avg_home_g and avg_away_g:
+            home_gs = _goal_strengths(home)
+            away_gs = _goal_strengths(away)
+            if home_gs and away_gs:
+                gf_home_h, ga_home_h, _, _ = home_gs
+                _, _, gf_away_a, ga_away_a = away_gs
+                avg_home_g, avg_away_g = float(avg_home_g), float(avg_away_g)
+
+                attack_home = gf_home_h / avg_home_g
+                defense_home = ga_home_h / avg_away_g
+                attack_away = gf_away_a / avg_away_g
+                defense_away = ga_away_a / avg_home_g
+
+                lh = avg_home_g * attack_home * defense_away
+                lav = avg_away_g * attack_away * defense_home
+
+                p_btts_raw = (1 - math.exp(-lh)) * (1 - math.exp(-lav))
+                lt = lh + lav
+                p_over25_raw = 1 - math.exp(-lt) * (1 + lt + (lt ** 2) / 2)
+
+                result["btts"] = round(_platt(p_btts_raw, *PLATT_BTTS) * 100, 1)
+                result["over25"] = round(_platt(p_over25_raw, *PLATT_OVER25) * 100, 1)
+
+        # --- Corners: Over 8.5 (excluye liga sin datos y filas 0-0 contaminadas) ---
+        if liga_id != LIGA_ID_SIN_CORNERS:
+            cur.execute("""
+                SELECT avg(corners_local), avg(corners_visitante) FROM partidos
+                WHERE liga_id=%s AND NOT (corners_local=0 AND corners_visitante=0)
+            """, (liga_id,))
+            avg_home_c, avg_away_c = cur.fetchone()
+
+            def _corner_strengths(team):
+                cur.execute("""
+                    SELECT avg(corners_local), avg(corners_visitante), count(*)
+                    FROM partidos WHERE liga_id=%s AND equipo_local ILIKE %s
+                    AND NOT (corners_local=0 AND corners_visitante=0)
+                """, (liga_id, f"%{team}%"))
+                cf_h, ca_h, n_h = cur.fetchone()
+                cur.execute("""
+                    SELECT avg(corners_visitante), avg(corners_local), count(*)
+                    FROM partidos WHERE liga_id=%s AND equipo_visitante ILIKE %s
+                    AND NOT (corners_local=0 AND corners_visitante=0)
+                """, (liga_id, f"%{team}%"))
+                cf_a, ca_a, n_a = cur.fetchone()
+                if cf_h is None or cf_a is None or n_h < 3 or n_a < 3:
+                    return None
+                return float(cf_h), float(ca_h), float(cf_a), float(ca_a)
+
+            if avg_home_c and avg_away_c:
+                home_cs = _corner_strengths(home)
+                away_cs = _corner_strengths(away)
+                if home_cs and away_cs:
+                    cf_home_h, ca_home_h, _, _ = home_cs
+                    _, _, cf_away_a, ca_away_a = away_cs
+                    avg_home_c, avg_away_c = float(avg_home_c), float(avg_away_c)
+
+                    attack_home_c = cf_home_h / avg_home_c
+                    defense_home_c = ca_home_h / avg_away_c
+                    attack_away_c = cf_away_a / avg_away_c
+                    defense_away_c = ca_away_a / avg_home_c
+
+                    lh_c = avg_home_c * attack_home_c * defense_away_c
+                    lav_c = avg_away_c * attack_away_c * defense_home_c
+                    lt_c = lh_c + lav_c
+
+                    p_over85_raw = 1 - _poisson_cdf_corners_le8(lt_c)
+                    result["corners_over85"] = round(_platt(p_over85_raw, *PLATT_CORNERS85) * 100, 1)
+
+        conn.close()
+        return result
+    except Exception as e:
+        print(f"[DEBUG] poisson_calibrated_probs({home} vs {away}) FALLO: {type(e).__name__}: {e}")
+        return result
+
+
+def _apply_statistical_calibration(picks: list[dict], home: str, away: str) -> list[dict]:
+    """Sustituye (o anade) la probabilidad de btts / over25 / corners_over85
+    por la del modelo Poisson+Platt validado, en vez de dejar la estimacion
+    libre de Claude para esas 3 condiciones concretas. El resto de picks
+    (los que genera Claude a partir del texto) no se tocan.
+
+    Si el modelo estadistico no tiene datos suficientes para un equipo/liga
+    (por ejemplo, equipos nuevos con pocos partidos en la BD), esa condicion
+    se deja tal cual la devolvio Claude -- nunca se inventa un numero."""
+    stat_probs = poisson_calibrated_probs(home, away)
+    if not stat_probs:
+        return picks
+
+    labels = {c["id"]: c["label"] for c in DEFAULT_CONDITIONS}
+    ids_ya_presentes = {p["id"] for p in picks}
+
+    resultado = []
+    for p in picks:
+        if p["id"] in stat_probs:
+            p = {**p, "probability": stat_probs[p["id"]],
+                 "reason": p.get("reason", "") + " (probabilidad ajustada con el modelo estadistico validado)"}
+        resultado.append(p)
+
+    # Si el modelo estadistico ve una probabilidad alta en una condicion que
+    # Claude no incluyo, la anadimos -- exactamente el mismo tipo de hueco
+    # que corregimos hace unos dias para corners/tarjetas, ahora respaldado
+    # por un numero validado en vez de solo una instruccion en el prompt.
+    for cond_id, prob in stat_probs.items():
+        if cond_id not in ids_ya_presentes and prob >= 60 and cond_id in labels:
+            resultado.append({
+                "id": cond_id,
+                "label": labels[cond_id],
+                "probability": prob,
+                "reason": "Calculado con el modelo estadistico validado (Poisson + calibracion Platt).",
+            })
+
+    return resultado
+
+
 async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] | None = None, match_date: str | None = None) -> tuple[str, list[dict]]:
     """Como analyze_match(), pero en la MISMA llamada a Claude (sin coste
     adicional de API) devuelve tambien una lista de picks estructurados:
@@ -921,6 +1130,7 @@ async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] 
             raw = "\n".join(text_parts)
             report, picks = _parse_picks_json(raw)
             picks = _validate_picks_against_data(picks, data)
+            picks = _apply_statistical_calibration(picks, home, away)
             return report, picks
     except httpx.HTTPStatusError as e:
         print(f"[DEBUG] Anthropic HTTPStatusError: {e.response.status_code} - {e.response.text}")
