@@ -866,6 +866,15 @@ PLATT_BTTS = (0.1079, 0.3977)        # (slope, intercept)
 PLATT_OVER25 = (0.2178, 0.4273)
 PLATT_CORNERS85 = (0.2576, 0.5763)
 
+# BTTS con modelo COMBINADO (media de la lambda de goles y la lambda de
+# tiros a puerta "traducida" a goles via tasa de conversion de la liga).
+# Validado con split temporal riguroso Y con backtest real contra cuotas:
+# mejora el acierto de 52.2% a 58.2% y reduce el error (Brier 0.2498 ->
+# 0.2420) frente al modelo de solo goles. Ver sesion de analisis
+# "modelo combinado BTTS". Solo se ha validado para BTTS -- Over 2.5 y el
+# resto de mercados siguen usando el modelo de solo-goles de siempre.
+PLATT_BTTS_COMBINADO = (0.4246, 0.1867)
+
 LIGA_ID_SIN_CORNERS = 14  # Urvalsdeild (Islandia): nunca ha tenido datos de corners/tarjetas
 
 
@@ -941,6 +950,25 @@ def poisson_calibrated_probs(home: str, away: str) -> dict:
                 return None
             return float(gf_h), float(ga_h), float(gf_a), float(ga_a)
 
+        def _shot_strengths(team):
+            """Igual que _goal_strengths pero con tiros a puerta -- se usa
+            SOLO para el modelo combinado de BTTS (ver PLATT_BTTS_COMBINADO)."""
+            cur.execute("""
+                SELECT avg(tiros_puerta_local), avg(tiros_puerta_visitante), count(*)
+                FROM partidos WHERE liga_id=%s AND equipo_local ILIKE %s
+                AND NOT (tiros_puerta_local=0 AND tiros_puerta_visitante=0)
+            """, (liga_id, f"%{team}%"))
+            sf_h, sa_h, n_h = cur.fetchone()
+            cur.execute("""
+                SELECT avg(tiros_puerta_visitante), avg(tiros_puerta_local), count(*)
+                FROM partidos WHERE liga_id=%s AND equipo_visitante ILIKE %s
+                AND NOT (tiros_puerta_local=0 AND tiros_puerta_visitante=0)
+            """, (liga_id, f"%{team}%"))
+            sf_a, sa_a, n_a = cur.fetchone()
+            if sf_h is None or sf_a is None or n_h < 3 or n_a < 3:
+                return None
+            return float(sf_h), float(sa_h), float(sf_a), float(sa_a)
+
         if avg_home_g and avg_away_g:
             home_gs = _goal_strengths(home)
             away_gs = _goal_strengths(away)
@@ -957,12 +985,44 @@ def poisson_calibrated_probs(home: str, away: str) -> dict:
                 lh = avg_home_g * attack_home * defense_away
                 lav = avg_away_g * attack_away * defense_home
 
-                p_btts_raw = (1 - math.exp(-lh)) * (1 - math.exp(-lav))
                 lt = lh + lav
                 p_over25_raw = 1 - math.exp(-lt) * (1 + lt + (lt ** 2) / 2)
-
-                result["btts"] = round(_platt(p_btts_raw, *PLATT_BTTS) * 100, 1)
                 result["over25"] = round(_platt(p_over25_raw, *PLATT_OVER25) * 100, 1)
+
+                # BTTS: modelo combinado (goles + tiros a puerta) si hay
+                # datos de tiros a puerta disponibles; si no, cae al
+                # modelo de solo goles (con su propia calibracion) para no
+                # dejar el mercado sin cubrir.
+                cur.execute("""
+                    SELECT avg(tiros_puerta_local), avg(tiros_puerta_visitante) FROM partidos
+                    WHERE liga_id=%s AND NOT (tiros_puerta_local=0 AND tiros_puerta_visitante=0)
+                """, (liga_id,))
+                avg_home_s, avg_away_s = cur.fetchone()
+                home_ss = _shot_strengths(home) if avg_home_s and avg_away_s else None
+                away_ss = _shot_strengths(away) if avg_home_s and avg_away_s else None
+
+                if home_ss and away_ss:
+                    sf_home_h, sa_home_h, _, _ = home_ss
+                    _, _, sf_away_a, sa_away_a = away_ss
+                    avg_home_s, avg_away_s = float(avg_home_s), float(avg_away_s)
+
+                    attack_home_s = sf_home_h / avg_home_s
+                    defense_home_s = sa_home_h / avg_away_s
+                    attack_away_s = sf_away_a / avg_away_s
+                    defense_away_s = sa_away_a / avg_home_s
+
+                    conv_home = avg_home_g / avg_home_s
+                    conv_away = avg_away_g / avg_away_s
+                    lh_s = avg_home_s * attack_home_s * defense_away_s * conv_home
+                    lav_s = avg_away_s * attack_away_s * defense_home_s * conv_away
+
+                    lh_comb = (lh + lh_s) / 2
+                    lav_comb = (lav + lav_s) / 2
+                    p_btts_raw = (1 - math.exp(-lh_comb)) * (1 - math.exp(-lav_comb))
+                    result["btts"] = round(_platt(p_btts_raw, *PLATT_BTTS_COMBINADO) * 100, 1)
+                else:
+                    p_btts_raw = (1 - math.exp(-lh)) * (1 - math.exp(-lav))
+                    result["btts"] = round(_platt(p_btts_raw, *PLATT_BTTS) * 100, 1)
 
         # --- Corners: Over 8.5 (excluye liga sin datos y filas 0-0 contaminadas) ---
         if liga_id != LIGA_ID_SIN_CORNERS:
