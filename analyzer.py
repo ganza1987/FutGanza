@@ -875,6 +875,16 @@ PLATT_CORNERS85 = (0.2576, 0.5763)
 # resto de mercados siguen usando el modelo de solo-goles de siempre.
 PLATT_BTTS_COMBINADO = (0.4246, 0.1867)
 
+
+# Tarjetas Over 3.5: antes descartada por ruidosa con muestra pequena
+# (~930 partidos de calibracion). Con la ingesta historica completa
+# (~2585 partidos de calibracion, casi el triple), la correccion mejora
+# de forma limpia y consistente en TODOS los deciles (antes solo mejoraba
+# en algunos). Validado con el mismo split temporal riguroso. Excluye
+# liga_id=14 (Islandia, sin datos reales) y exige minimo 5 partidos por
+# equipo para calcular su fuerza.
+PLATT_CARDS35 = (0.5332, 0.0171)
+
 LIGA_ID_SIN_CORNERS = 14  # Urvalsdeild (Islandia): nunca ha tenido datos de corners/tarjetas
 
 
@@ -892,6 +902,16 @@ def _poisson_cdf_corners_le8(lt: float) -> float:
     pmf = math.exp(-lt)
     cdf = pmf
     for k in range(1, 9):
+        pmf *= lt / k
+        cdf += pmf
+    return cdf
+
+
+def _poisson_cdf_cards_le3(lt: float) -> float:
+    """P(tarjetas totales <= 3) via suma directa de la Poisson pmf, k=0..3."""
+    pmf = math.exp(-lt)
+    cdf = pmf
+    for k in range(1, 4):
         pmf *= lt / k
         cdf += pmf
     return cdf
@@ -1068,6 +1088,54 @@ def poisson_calibrated_probs(home: str, away: str) -> dict:
 
                     p_over85_raw = 1 - _poisson_cdf_corners_le8(lt_c)
                     result["corners_over85"] = round(_platt(p_over85_raw, *PLATT_CORNERS85) * 100, 1)
+
+        # --- Tarjetas: Over 3.5 (excluye liga sin datos y exige minimo 5
+        # partidos por equipo para calcular su fuerza, igual que se
+        # valido) ---
+        if liga_id != LIGA_ID_SIN_CORNERS:
+            cur.execute("""
+                SELECT avg(tarjetas_amarillas_local+tarjetas_rojas_local),
+                       avg(tarjetas_amarillas_visitante+tarjetas_rojas_visitante)
+                FROM partidos WHERE liga_id=%s
+            """, (liga_id,))
+            avg_home_j, avg_away_j = cur.fetchone()
+
+            def _card_strengths(team):
+                cur.execute("""
+                    SELECT avg(tarjetas_amarillas_local+tarjetas_rojas_local),
+                           avg(tarjetas_amarillas_visitante+tarjetas_rojas_visitante), count(*)
+                    FROM partidos WHERE liga_id=%s AND equipo_local ILIKE %s
+                """, (liga_id, f"%{team}%"))
+                jf_h, ja_h, n_h = cur.fetchone()
+                cur.execute("""
+                    SELECT avg(tarjetas_amarillas_visitante+tarjetas_rojas_visitante),
+                           avg(tarjetas_amarillas_local+tarjetas_rojas_local), count(*)
+                    FROM partidos WHERE liga_id=%s AND equipo_visitante ILIKE %s
+                """, (liga_id, f"%{team}%"))
+                jf_a, ja_a, n_a = cur.fetchone()
+                if jf_h is None or jf_a is None or n_h < 5 or n_a < 5:
+                    return None
+                return float(jf_h), float(ja_h), float(jf_a), float(ja_a)
+
+            if avg_home_j and avg_away_j:
+                home_js = _card_strengths(home)
+                away_js = _card_strengths(away)
+                if home_js and away_js:
+                    jf_home_h, ja_home_h, _, _ = home_js
+                    _, _, jf_away_a, ja_away_a = away_js
+                    avg_home_j, avg_away_j = float(avg_home_j), float(avg_away_j)
+
+                    attack_home_j = jf_home_h / avg_home_j
+                    defense_home_j = ja_home_h / avg_away_j
+                    attack_away_j = jf_away_a / avg_away_j
+                    defense_away_j = ja_away_a / avg_home_j
+
+                    lh_j = avg_home_j * attack_home_j * defense_away_j
+                    lav_j = avg_away_j * attack_away_j * defense_home_j
+                    lt_j = max(lh_j + lav_j, 0.05)
+
+                    p_cards35_raw = 1 - _poisson_cdf_cards_le3(lt_j)
+                    result["cards_over35"] = round(_platt(p_cards35_raw, *PLATT_CARDS35) * 100, 1)
 
         conn.close()
         return result
