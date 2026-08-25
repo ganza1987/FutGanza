@@ -860,11 +860,13 @@ def _validate_picks_against_data(picks: list[dict], data: dict) -> list[dict]:
 #      paso 2 vieron nunca)
 # Los tres mercados de abajo pasaron esa prueba ciega con una mejora clara
 # del error de calibracion. Ver sesion de analisis "corners/goles/btts"
-# para el detalle completo. Tarjetas y "away_goals" NO se incluyen aqui
-# porque no superaron esa misma prueba con suficiente fiabilidad.
+# para el detalle completo. home_goals, away_goals, tarjetas y el modelo
+# combinado de BTTS se validaron y anadieron en sesiones posteriores (ver
+# comentarios junto a cada constante mas abajo).
 PLATT_BTTS = (0.1079, 0.3977)        # (slope, intercept)
 PLATT_OVER25 = (0.2178, 0.4273)
 PLATT_CORNERS85 = (0.2576, 0.5763)
+PLATT_HOME_GOALS = (0.5742, 0.1132)  # validado, mejora moderada (~9.2pp -> ~6.1pp de error)
 
 # BTTS con modelo COMBINADO (media de la lambda de goles y la lambda de
 # tiros a puerta "traducida" a goles via tasa de conversion de la liga).
@@ -884,6 +886,14 @@ PLATT_BTTS_COMBINADO = (0.4246, 0.1867)
 # liga_id=14 (Islandia, sin datos reales) y exige minimo 5 partidos por
 # equipo para calcular su fuerza.
 PLATT_CARDS35 = (0.5332, 0.0171)
+
+
+# away_goals: coeficientes actualizados. La primera vez que se valido (con
+# ~900 partidos de calibracion) la correccion no mejoraba nada frente a
+# usar la probabilidad cruda. Con la ingesta historica completa (~2747
+# partidos de calibracion, 3 veces mas), SI mejora de forma clara y
+# consistente en los 5 deciles (error medio de ~6.3pp a ~1.7pp).
+PLATT_AWAY_GOALS_V2 = (0.3662, -0.2752)
 
 LIGA_ID_SIN_CORNERS = 14  # Urvalsdeild (Islandia): nunca ha tenido datos de corners/tarjetas
 
@@ -1008,6 +1018,12 @@ def poisson_calibrated_probs(home: str, away: str) -> dict:
                 lt = lh + lav
                 p_over25_raw = 1 - math.exp(-lt) * (1 + lt + (lt ** 2) / 2)
                 result["over25"] = round(_platt(p_over25_raw, *PLATT_OVER25) * 100, 1)
+
+                p_home15_raw = 1 - math.exp(-lh) * (1 + lh)
+                result["home_goals"] = round(_platt(p_home15_raw, *PLATT_HOME_GOALS) * 100, 1)
+
+                p_away15_raw = 1 - math.exp(-lav) * (1 + lav)
+                result["away_goals"] = round(_platt(p_away15_raw, *PLATT_AWAY_GOALS_V2) * 100, 1)
 
                 # BTTS: modelo combinado (goles + tiros a puerta) si hay
                 # datos de tiros a puerta disponibles; si no, cae al
