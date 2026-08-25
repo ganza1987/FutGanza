@@ -15,7 +15,7 @@ from datetime import datetime, timezone, timedelta
 from analyzer import analyze_match, analyze_match_with_picks
 from bot_handler import send_message, split_message
 from database import add_pick, get_pending_picks_to_verify, update_pick_result
-from odds_handler import fetch_and_store_odds
+from odds_handler import fetch_and_store_odds, guardar_partido_pendiente
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +325,14 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
                 "kickoff": kickoff,
                 "fixture_id": fixture_id,
             })
+            # Guarda el partido en "partidos" ANTES de jugarse (sin
+            # resultado todavia) -- necesario para que value_bets.py
+            # (modo en vivo) pueda encontrarlo mas tarde y detectar valor
+            # en tiempo real. Es seguro: nunca sobrescribe datos si el
+            # partido ya existiera por otro motivo (ver ON CONFLICT DO
+            # NOTHING dentro de guardar_partido_pendiente).
+            if kickoff_dt is not None:
+                guardar_partido_pendiente(fixture_id, league_id, kickoff_dt, home, away)
             await fetch_and_store_odds(fixture_id, league_id)
         await asyncio.sleep(0.5)
 
