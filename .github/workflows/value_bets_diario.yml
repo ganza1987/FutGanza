@@ -1,0 +1,37 @@
+name: Deteccion de valor FutGanza
+
+# Corre DESPUES de cada analisis diario del bot (06:00 y 12:30 hora
+# España), para dar tiempo a que scheduler.py ya haya guardado las cuotas
+# y el partido pendiente en "partidos" antes de que value_bets.py los
+# busque. El margen es amplio (45 min - 1h15) para cubrir tanto horario
+# de verano como de invierno sin ajustar el cron dos veces al año.
+on:
+  schedule:
+    - cron: '15 6 * * *'   # ~06:15-07:15 hora España, tras el analisis de 06:00
+    - cron: '45 12 * * *'  # ~13:45-14:45 hora España, tras el analisis de 12:30
+  workflow_dispatch:
+
+jobs:
+  deteccion_valor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Verificar picks pendientes (partidos ya jugados desde la ultima vez)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python value_bets.py --verificar
+
+      - name: Buscar y guardar nuevos picks de valor
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python value_bets.py
