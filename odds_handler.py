@@ -117,6 +117,71 @@ async def fetch_and_store_odds(fixture_id: int, liga_id: int | None = None) -> i
         return 0
 
 
+def guardar_partido_pendiente(fixture_id: int, api_league_id: int, fecha, equipo_local: str, equipo_visitante: str) -> bool:
+    """Guarda una fila "hueco" en partidos para un partido que TODAVIA NO
+    se ha jugado (goles_local/visitante y el resto de estadisticas se
+    dejan en NULL). Se llama justo cuando el scheduler ya sabe que partido
+    va a analizar hoy, antes de que se juegue.
+
+    Por que hace falta: la ingesta diaria (build_database.py, via GitHub
+    Actions) solo trae partidos YA FINALIZADOS (status=FT) -- nunca guarda
+    un partido de antemano. Sin esta fila previa, el motor de deteccion de
+    valor en tiempo real (value_bets.py, modo "en vivo") nunca tiene nada
+    que analizar, porque busca partidos en "partidos" con goles_local NULL
+    y cuotas ya guardadas, y esa combinacion nunca existia.
+
+    Es seguro repetir la llamada: usa ON CONFLICT (api_fixture_id) DO
+    NOTHING, asi que si el partido ya existe (por ejemplo porque la
+    ingesta normal ya lo trajo con resultado), esta funcion NUNCA
+    sobrescribe ni borra datos ya guardados -- solo rellena el hueco si no
+    habia nada.
+
+    api_league_id es el ID de liga de API-Football (el mismo que usa
+    scheduler.py, ej. 113 para Allsvenskan) -- se traduce aqui al id
+    interno de la tabla "ligas" antes de guardar, porque partidos.liga_id
+    apunta a ligas.id, no al ID de API-Football."""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        if DB_TYPE == "postgres":
+            cur.execute("SELECT id FROM ligas WHERE api_league_id = %s", (api_league_id,))
+        else:
+            cur.execute("SELECT id FROM ligas WHERE api_league_id = ?", (api_league_id,))
+        row = cur.fetchone()
+        if not row:
+            logger.warning(f"guardar_partido_pendiente: liga API {api_league_id} no encontrada en tabla ligas, se omite")
+            cur.close()
+            conn.close()
+            return False
+        liga_id_interno = row[0]
+
+        if DB_TYPE == "postgres":
+            cur.execute(
+                """
+                INSERT INTO partidos (api_fixture_id, liga_id, fecha, equipo_local, equipo_visitante)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (api_fixture_id) DO NOTHING
+                """,
+                (fixture_id, liga_id_interno, fecha, equipo_local, equipo_visitante),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO partidos (api_fixture_id, liga_id, fecha, equipo_local, equipo_visitante)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (fixture_id, liga_id_interno, fecha, equipo_local, equipo_visitante),
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"guardar_partido_pendiente({fixture_id}): {type(e).__name__}: {e}")
+        return False
+
+
 # ── Utilidad de lectura para el futuro motor de backtesting ───────────────
 
 # Nombres de mercado (campo "name" dentro de cada bet) más relevantes para
@@ -160,4 +225,3 @@ def get_odds_for_fixture(fixture_id: int) -> list[dict]:
         if isinstance(r.get("markets"), str):
             r["markets"] = json.loads(r["markets"])
     return rows
-
