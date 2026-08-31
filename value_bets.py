@@ -25,7 +25,8 @@ Dos modos de uso:
         Modo EN VIVO: busca picks de valor entre los partidos que tienen
         cuotas guardadas pero SIN resultado todavia (partidos futuros o en
         juego). Pensado para ejecutarse a diario junto al resto de tareas
-        programadas.
+        programadas. Si TELEGRAM_TOKEN y NOTIFY_CHAT_IDS estan
+        configurados, ademas manda un mensaje por cada pick detectado.
 
     python value_bets.py --backtest
         Modo BACKTEST: usa unicamente partidos que YA tienen resultado
@@ -35,8 +36,17 @@ Dos modos de uso:
         segun se acumulen mas dias de cuotas guardadas -- con pocos casos
         (como ahora) el resultado no es fiable estadisticamente todavia.
 
+    python value_bets.py --verificar
+        Solo verifica los picks en vivo pendientes (ver si ya se jugaron),
+        sin buscar nuevos ni hacer backtest.
+
+    python value_bets.py --resumen
+        Muestra el rendimiento acumulado de los picks en vivo ya
+        guardados (aciertos, ROI), sin buscar nuevos.
+
 Variables de entorno necesarias: DATABASE_URL (las mismas que ya usas en
-el resto del proyecto).
+el resto del proyecto). Opcionales para notificar por Telegram:
+TELEGRAM_TOKEN, NOTIFY_CHAT_IDS (mismas que ya usa el bot principal).
 """
 
 import os
@@ -47,8 +57,37 @@ from datetime import datetime, timezone
 
 import psycopg2
 import psycopg2.extras
+import requests
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+# Notificacion por Telegram (opcional): si estas dos variables estan
+# configuradas (son las MISMAS que ya usa el bot principal, TELEGRAM_TOKEN
+# y NOTIFY_CHAT_IDS -- hay que darlas de alta tambien como secretos de
+# GitHub Actions si se quiere que el workflow automatico notifique), se
+# manda un mensaje cada vez que se detecta y guarda un pick de valor
+# nuevo. Si no estan configuradas, el script sigue funcionando igual y
+# simplemente no notifica (no es obligatorio para nada del resto de
+# funcionalidad).
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+NOTIFY_CHAT_IDS = [c.strip() for c in os.getenv("NOTIFY_CHAT_IDS", "").split(",") if c.strip()]
+
+
+def notificar_telegram(mensaje: str):
+    """Manda un mensaje a todos los chats configurados en NOTIFY_CHAT_IDS.
+    Si falta el token o no hay chats configurados, no hace nada (no es un
+    error -- la notificacion es opcional)."""
+    if not TELEGRAM_TOKEN or not NOTIFY_CHAT_IDS:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    for chat_id in NOTIFY_CHAT_IDS:
+        try:
+            r = requests.post(url, json={"chat_id": chat_id, "text": mensaje, "parse_mode": "Markdown"}, timeout=15)
+            if r.status_code != 200:
+                print(f"[AVISO] No se pudo notificar a {chat_id}: {r.text}")
+        except Exception as e:
+            print(f"[AVISO] Error notificando a Telegram: {e}")
+
 
 # Liga sin datos reales de corners/tarjetas (Urvalsdeild, Islandia) --
 # se excluye siempre de esos mercados. Ver sesion de analisis de corners.
@@ -419,7 +458,6 @@ def consenso_y_mejor_corners(cuotas: dict, linea: float):
     return consenso_y_mejor(cuotas, MERCADO_CORNERS, valor_over, valor_under)
 
 
-
 def consenso_y_mejor(cuotas: dict, mercado: str, valor: str, opuesto: str):
     """Devuelve (probabilidad_consenso_sin_vig, mejor_cuota) para un
     mercado/valor concreto, o (None, None) si no hay datos suficientes."""
@@ -567,11 +605,6 @@ def modo_en_vivo(conn):
         JOIN cuotas c ON c.fixture_id::text = p.api_fixture_id::text
         WHERE p.goles_local IS NULL
     """)
-    # Nota: si tu tabla partidos no tiene partidos futuros (solo guarda
-    # resultados ya jugados), esta consulta no encontrara nada -- en ese
-    # caso el partido con cuotas pero sin jugar aun no estara en
-    # "partidos" todavia. Se deja preparado para cuando la ingesta
-    # incluya tambien los proximos partidos.
     fixtures = cur.fetchall()
 
     if not fixtures:
@@ -639,6 +672,17 @@ def modo_en_vivo(conn):
         print(f"  Mercado: {p['mercado']}")
         print(f"  Nuestra probabilidad: {p['nuestra_prob']}%  |  Consenso mercado: {p['consenso']}%")
         print(f"  Ventaja: +{p['edge']} puntos  |  Mejor cuota disponible: {p['mejor_cuota']}")
+
+    lineas_msg = [f"🎯 *{len(encontrados)} pick(s) de valor detectado(s)*\n"]
+    for p in encontrados:
+        lineas_msg.append(
+            f"*{p['partido']}*\n"
+            f"{p['mercado']}\n"
+            f"Nuestra prob: {p['nuestra_prob']}% | Mercado: {p['consenso']}% | Ventaja: +{p['edge']}pp\n"
+            f"Mejor cuota: {p['mejor_cuota']}\n"
+        )
+    lineas_msg.append("_Recuerda: la muestra todavia es pequena, revisa con --resumen antes de confiar del todo._")
+    notificar_telegram("\n".join(lineas_msg))
 
 
 # ---------------------------------------------------------------------------
@@ -727,11 +771,6 @@ def modo_backtest(conn):
     resumen(f"Con valor (edge > {MARGEN_SEGURIDAD_PP} puntos)", con_valor)
     resumen("Sin valor (resto)", sin_valor)
 
-    # Desglose por mercado -- para ver si el problema (o la ventaja) esta
-    # concentrado en un mercado concreto en vez de repartido por igual.
-    # Se calcula sobre TODAS las apuestas (con y sin valor juntas), porque
-    # aqui interesa saber si el modelo en si acierta bien en cada mercado,
-    # no solo las que pasaron el filtro de valor.
     print(f"\n{'='*70}\nDESGLOSE POR MERCADO (todas las apuestas, con y sin valor)\n{'='*70}")
     todas = con_valor + sin_valor
     por_mercado: dict[str, list] = {}
