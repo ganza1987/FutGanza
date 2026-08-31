@@ -34,4 +34,6 @@ jobs:
       - name: Buscar y guardar nuevos picks de valor
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          NOTIFY_CHAT_IDS: ${{ secrets.NOTIFY_CHAT_IDS }}
         run: python value_bets.py
