@@ -99,7 +99,24 @@ LIGA_ID_SIN_CORNERS = 14
 # produccion. En modo --backtest, este corte se ajusta automaticamente
 # para no hacer trampa (nunca se usan partidos del propio periodo de
 # prueba para calcular las fuerzas de los equipos).
-MARGEN_SEGURIDAD_PP = 15.0  # puntos porcentuales de ventaja minima exigida
+MARGEN_SEGURIDAD_PP = 15.0  # puntos porcentuales de ventaja minima exigida (metodo actual)
+
+# Metodo alternativo en evaluacion EN PARALELO (ver sesion de analisis
+# "edge de mercado", 2026-09-12): en vez de comparar puntos porcentuales de
+# probabilidad, compara el valor esperado real usando la cuota ofrecida
+# (EV = nuestra_prob * cuota - 1). El metodo de puntos favorece de forma
+# estructural las apuestas de cuota muy alta/probabilidad baja frente a
+# mercados que rondan el 50% (btts, over25): un backtest de comparacion
+# (2121 apuestas candidatas, 248 partidos) mostro que EV>10% selecciona
+# ~6x mas apuestas y las reparte de forma mucho mas uniforme entre
+# mercados, con un ROI mas modesto pero sobre una muestra mucho mayor
+# (+3.4% en 327 apuestas) frente al metodo de puntos (+12.9% pero solo
+# en 55 apuestas -- posible ruido con tan poca muestra). Ninguno de los
+# dos metodos decide todavia que apuestas se marcan como "de valor" en
+# exclusiva: ambos se calculan y guardan para cada candidata (ver
+# modo_en_vivo) y se comparan con --comparar segun se acumulen mas
+# resultados reales, antes de descartar uno de los dos.
+MARGEN_EV = 0.10  # valor esperado minimo (10%) para el metodo alternativo
 
 # Coeficientes de calibracion de Platt (slope, intercept), validados con
 # split temporal riguroso (fuerza 2023-24 -> calibracion 2025 -> prueba
@@ -503,23 +520,52 @@ def crear_tabla_value_picks(conn):
             resultado TEXT DEFAULT 'pending'
         )
     """)
+    # Columnas para la comparacion en paralelo de metodos (ver MARGEN_EV mas
+    # arriba). ADD COLUMN IF NOT EXISTS es seguro sobre la tabla ya existente:
+    # las filas antiguas quedan con estas columnas en NULL (se tratan como
+    # "metodo desconocido, la fila es de antes de la comparacion" en
+    # resumen_picks_en_vivo, nunca se inventan valores para ellas).
+    cur.execute("ALTER TABLE value_picks_historial ADD COLUMN IF NOT EXISTS ev NUMERIC")
+    cur.execute("ALTER TABLE value_picks_historial ADD COLUMN IF NOT EXISTS pasa_pp BOOLEAN")
+    cur.execute("ALTER TABLE value_picks_historial ADD COLUMN IF NOT EXISTS pasa_ev BOOLEAN")
     conn.commit()
+
+
+def _ya_registrado(conn, fixture_id, condicion) -> bool:
+    """Comprueba si este fixture+condicion ya se guardo en una ejecucion
+    anterior (el mismo partido pendiente se re-analiza en cada ejecucion del
+    cron hasta que se juega, y sin esta comprobacion se duplicaba la fila
+    cada vez -- ver sesion de analisis "edge de mercado", 2026-09-12, donde
+    118 de 119 filas resultaron ser duplicados del mismo hallazgo)."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM value_picks_historial WHERE fixture_id = %s AND condicion = %s LIMIT 1",
+        (fixture_id, condicion)
+    )
+    return cur.fetchone() is not None
 
 
 def guardar_picks_detectados(conn, encontrados: list[dict]):
-    """Inserta cada pick detectado en value_picks_historial, con
-    resultado='pending' hasta que verificar_picks_pendientes() los
-    resuelva mas adelante."""
+    """Inserta cada pick detectado en value_picks_historial (una sola vez
+    por fixture+condicion, ver _ya_registrado), con resultado='pending'
+    hasta que verificar_picks_pendientes() los resuelva mas adelante."""
     crear_tabla_value_picks(conn)
     cur = conn.cursor()
+    nuevos = 0
     for p in encontrados:
+        if _ya_registrado(conn, p["fixture_id"], p["condicion"]):
+            continue
         cur.execute("""
             INSERT INTO value_picks_historial
-                (fixture_id, condicion, partido, mercado, nuestra_prob, consenso, edge, mejor_cuota)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (fixture_id, condicion, partido, mercado, nuestra_prob, consenso, edge,
+                 mejor_cuota, ev, pasa_pp, pasa_ev)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (p["fixture_id"], p["condicion"], p["partido"], p["mercado"],
-              p["nuestra_prob"], p["consenso"], p["edge"], p["mejor_cuota"]))
+              p["nuestra_prob"], p["consenso"], p["edge"], p["mejor_cuota"],
+              p["ev"], p["pasa_pp"], p["pasa_ev"]))
+        nuevos += 1
     conn.commit()
+    return nuevos
 
 
 def _acierto_condicion(condicion: str, goles_local, goles_visitante, corners_local, corners_visitante):
@@ -625,7 +671,10 @@ def modo_en_vivo(conn):
             if prob_consenso is None:
                 continue
             edge = prob - prob_consenso
-            if edge > MARGEN_SEGURIDAD_PP:
+            ev = (prob / 100 * mejor_cuota) - 1
+            pasa_pp = edge > MARGEN_SEGURIDAD_PP
+            pasa_ev = ev > MARGEN_EV
+            if pasa_pp or pasa_ev:
                 encontrados.append({
                     "fixture_id": row["api_fixture_id"],
                     "condicion": cond_id,
@@ -634,6 +683,9 @@ def modo_en_vivo(conn):
                     "nuestra_prob": prob,
                     "consenso": prob_consenso,
                     "edge": round(edge, 1),
+                    "ev": round(ev, 3),
+                    "pasa_pp": pasa_pp,
+                    "pasa_ev": pasa_ev,
                     "mejor_cuota": mejor_cuota,
                 })
 
@@ -646,7 +698,10 @@ def modo_en_vivo(conn):
             if prob_consenso is None:
                 continue
             edge = prob_c - prob_consenso
-            if edge > MARGEN_SEGURIDAD_PP:
+            ev = (prob_c / 100 * mejor_cuota) - 1
+            pasa_pp = edge > MARGEN_SEGURIDAD_PP
+            pasa_ev = ev > MARGEN_EV
+            if pasa_pp or pasa_ev:
                 encontrados.append({
                     "fixture_id": row["api_fixture_id"],
                     "condicion": f"corners_{linea:g}",
@@ -655,33 +710,41 @@ def modo_en_vivo(conn):
                     "nuestra_prob": prob_c,
                     "consenso": prob_consenso,
                     "edge": round(edge, 1),
+                    "ev": round(ev, 3),
+                    "pasa_pp": pasa_pp,
+                    "pasa_ev": pasa_ev,
                     "mejor_cuota": mejor_cuota,
                 })
 
     if not encontrados:
-        print("No se ha detectado ningun pick con valor (edge > "
-              f"{MARGEN_SEGURIDAD_PP} puntos) en este momento.")
+        print("No se ha detectado ningun pick con valor (ni por puntos > "
+              f"{MARGEN_SEGURIDAD_PP} ni por EV > {MARGEN_EV:.0%}) en este momento.")
         return
 
-    guardar_picks_detectados(conn, encontrados)
+    nuevos = guardar_picks_detectados(conn, encontrados)
+    if nuevos == 0:
+        print(f"Los {len(encontrados)} picks detectados ya estaban guardados de una ejecucion anterior (mismo partido, sin jugarse todavia). Nada nuevo que notificar.")
+        return
 
     encontrados.sort(key=lambda x: x["edge"], reverse=True)
-    print(f"{'='*70}\n{len(encontrados)} PICKS DE VALOR DETECTADOS (guardados para verificar mas tarde)\n{'='*70}")
+    print(f"{'='*70}\n{nuevos} PICKS DE VALOR NUEVOS (de {len(encontrados)} detectados; guardados para verificar mas tarde)\n{'='*70}")
     for p in encontrados:
+        metodo = "puntos+EV" if p["pasa_pp"] and p["pasa_ev"] else ("puntos" if p["pasa_pp"] else "EV")
         print(f"\n{p['partido']}")
-        print(f"  Mercado: {p['mercado']}")
+        print(f"  Mercado: {p['mercado']}  |  Metodo: {metodo}")
         print(f"  Nuestra probabilidad: {p['nuestra_prob']}%  |  Consenso mercado: {p['consenso']}%")
-        print(f"  Ventaja: +{p['edge']} puntos  |  Mejor cuota disponible: {p['mejor_cuota']}")
+        print(f"  Ventaja: +{p['edge']} puntos  |  EV: {p['ev']:+.0%}  |  Mejor cuota disponible: {p['mejor_cuota']}")
 
-    lineas_msg = [f"🎯 *{len(encontrados)} pick(s) de valor detectado(s)*\n"]
+    lineas_msg = [f"🎯 *{nuevos} pick(s) de valor nuevo(s)*\n"]
     for p in encontrados:
+        metodo = "puntos+EV" if p["pasa_pp"] and p["pasa_ev"] else ("puntos" if p["pasa_pp"] else "EV")
         lineas_msg.append(
             f"*{p['partido']}*\n"
-            f"{p['mercado']}\n"
-            f"Nuestra prob: {p['nuestra_prob']}% | Mercado: {p['consenso']}% | Ventaja: +{p['edge']}pp\n"
+            f"{p['mercado']} · _metodo: {metodo}_\n"
+            f"Nuestra prob: {p['nuestra_prob']}% | Mercado: {p['consenso']}% | Ventaja: +{p['edge']}pp | EV: {p['ev']:+.0%}\n"
             f"Mejor cuota: {p['mejor_cuota']}\n"
         )
-    lineas_msg.append("_Recuerda: la muestra todavia es pequena, revisa con --resumen antes de confiar del todo._")
+    lineas_msg.append("_Se estan comparando dos metodos en paralelo (puntos vs EV) -- revisa con --comparar antes de confiar del todo._")
     notificar_telegram("\n".join(lineas_msg))
 
 
@@ -818,6 +881,59 @@ def resumen_picks_en_vivo(conn):
         print("\nAun no hay ningun pick resuelto (todos siguen pendientes de jugarse).")
 
 
+def comparar_metodos_en_vivo(conn):
+    """Compara el rendimiento REAL (picks en vivo ya resueltos) del metodo
+    de puntos porcentuales vs el metodo de EV, ejecutandose en paralelo
+    desde el 2026-09-12 (ver MARGEN_EV). Pensado para revisar periodicamente
+    (ej. cada semana) como va evolucionando cada metodo con datos frescos,
+    antes de decidir si se sustituye el metodo de puntos por el de EV, se
+    mantienen los dos, o se descarta el de EV.
+
+    Las filas anteriores a esa fecha tienen pasa_pp/pasa_ev en NULL (no
+    existian estas columnas) y se excluyen de la comparacion por metodo,
+    aunque cuentan en el total general."""
+    crear_tabla_value_picks(conn)
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM value_picks_historial WHERE resultado IN ('hit', 'miss') ORDER BY fecha_deteccion")
+    resueltos = cur.fetchall()
+
+    con_metodo = [f for f in resueltos if f["pasa_pp"] is not None]
+    sin_metodo = len(resueltos) - len(con_metodo)
+
+    print(f"{'='*70}\nCOMPARACION DE METODOS (picks en vivo ya resueltos)\n{'='*70}")
+    print(f"Total resueltos: {len(resueltos)}  |  Sin dato de metodo (previos a la comparacion): {sin_metodo}")
+
+    if not con_metodo:
+        print("\nTodavia no hay ningun pick resuelto con ambos metodos calculados. "
+              "Vuelve a mirar cuando se hayan jugado mas partidos.")
+        return
+
+    def resumen(nombre, lista):
+        if not lista:
+            print(f"\n{nombre}: sin datos todavia.")
+            return
+        n = len(lista)
+        aciertos = sum(1 for x in lista if x["resultado"] == "hit")
+        beneficio = sum((float(x["mejor_cuota"]) - 1) if x["resultado"] == "hit" else -1 for x in lista)
+        roi = 100 * beneficio / n
+        print(f"\n{nombre}: {n} apuestas  |  {aciertos} aciertos ({100*aciertos/n:.1f}%)  |  "
+              f"Beneficio: {beneficio:+.2f}u  |  ROI: {roi:+.1f}%")
+
+    solo_pp = [f for f in con_metodo if f["pasa_pp"] and not f["pasa_ev"]]
+    solo_ev = [f for f in con_metodo if f["pasa_ev"] and not f["pasa_pp"]]
+    ambos = [f for f in con_metodo if f["pasa_pp"] and f["pasa_ev"]]
+
+    resumen("Solo metodo de PUNTOS (pp>15, no cumple EV>10%)", solo_pp)
+    resumen("Solo metodo de EV (EV>10%, no cumple pp>15)", solo_ev)
+    resumen("Ambos metodos coinciden", ambos)
+    resumen("TODO lo seleccionado por puntos (solo_pp + ambos)", solo_pp + ambos)
+    resumen("TODO lo seleccionado por EV (solo_ev + ambos)", solo_ev + ambos)
+
+    if len(con_metodo) < 30:
+        print(f"\nAVISO: solo {len(con_metodo)} picks resueltos con ambos metodos calculados. "
+              "Todavia es pronto para sacar conclusiones -- sigue acumulando y vuelve a mirar.")
+
+
 def main():
     global MARGEN_SEGURIDAD_PP
     parser = argparse.ArgumentParser(description="Deteccion de picks de valor y backtesting.")
@@ -827,6 +943,8 @@ def main():
                          help="Solo verifica los picks en vivo pendientes (ver si ya se jugaron), sin buscar nuevos ni hacer backtest.")
     parser.add_argument("--resumen", action="store_true",
                          help="Muestra el rendimiento acumulado de los picks en vivo ya guardados (aciertos, ROI), sin buscar nuevos.")
+    parser.add_argument("--comparar", action="store_true",
+                         help="Compara el rendimiento real del metodo de puntos vs el metodo de EV (ver MARGEN_EV), corriendo en paralelo desde 2026-09-12.")
     parser.add_argument("--margen", type=float, default=None,
                          help=f"Margen de seguridad en puntos porcentuales (por defecto {MARGEN_SEGURIDAD_PP}).")
     args = parser.parse_args()
@@ -841,6 +959,8 @@ def main():
             print(f"Verificados {verificados} picks (se jugaron ya). Siguen pendientes: {siguen_pendientes}.")
         elif args.resumen:
             resumen_picks_en_vivo(conn)
+        elif args.comparar:
+            comparar_metodos_en_vivo(conn)
         elif args.backtest:
             modo_backtest(conn)
         else:

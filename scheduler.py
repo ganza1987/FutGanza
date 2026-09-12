@@ -21,15 +21,27 @@ logger = logging.getLogger(__name__)
 
 ALERT_HOURS      = int(os.getenv("ALERT_HOURS", "2"))
 CHAT_IDS_ENV     = os.getenv("NOTIFY_CHAT_IDS", "")
-APIFOOTBALL_KEY  = os.getenv("APIFOOTBALL_KEY", "888285a75737af52283245495c97c67a")
+APIFOOTBALL_KEY  = os.getenv("APIFOOTBALL_KEY", "")
 APIFOOTBALL_URL  = "https://v3.football.api-sports.io"
 
 # ── Candado anti-solapamiento: evita que dos analisis corran a la vez ─────────
 _analysis_running = False
 
 # ── Picks diarios (ranking de mayor probabilidad, cualquier mercado) ──────────
-MIN_CONFIANZA_PICK   = 70   # % minimo para que un pick aparezca en el ranking
+MIN_CONFIANZA_PICK   = 70   # % minimo por defecto para que un pick aparezca en el ranking
 MAX_PICKS_MOSTRADOS  = 10   # techo de picks a mostrar (si hay menos, se muestran menos)
+
+# btts/over25 usan una calibracion Platt con pendiente baja (ver PLATT_BTTS y
+# PLATT_OVER25 en analyzer.py): su probabilidad calibrada casi siempre cae en
+# una banda estrecha (~55-65%) incluso cuando el partido es un caso claro, asi
+# que con el umbral general de 70% practicamente nunca aparecian en el
+# ranking (corners/tarjetas si tienen rango suficiente para superar 70% con
+# regularidad en estas ligas). Se les da un umbral mas bajo, propio de su
+# rango de calibracion, en vez de bajar la exigencia para todos los mercados.
+MIN_CONFIANZA_PICK_POR_MERCADO = {
+    "btts": 60,
+    "over25": 60,
+}
 
 # ── League definitions ─────────────────────────────────────────────────────────
 
@@ -160,10 +172,14 @@ async def get_upcoming_fixtures(league_id: int, season: int, hours_ahead: int = 
 
 
 def format_picks_message(all_picks: list[dict], region_name: str) -> str:
-    """Construye el mensaje de ranking de picks del dia (independiente del
-    mercado): los que superen MIN_CONFIANZA_PICK, ordenados de mayor a menor
+    """Construye el mensaje de ranking de picks del dia: los que superen su
+    umbral minimo de confianza (MIN_CONFIANZA_PICK_POR_MERCADO si el mercado
+    tiene uno propio, si no MIN_CONFIANZA_PICK), ordenados de mayor a menor
     probabilidad, con un maximo de MAX_PICKS_MOSTRADOS."""
-    filtrados = [p for p in all_picks if p["probability"] >= MIN_CONFIANZA_PICK]
+    filtrados = [
+        p for p in all_picks
+        if p["probability"] >= MIN_CONFIANZA_PICK_POR_MERCADO.get(p["id"], MIN_CONFIANZA_PICK)
+    ]
 
     if not filtrados:
         return (

@@ -503,7 +503,189 @@ async def build_real_data(home_name: str, away_name: str) -> dict:
     print(f"[DEBUG] build_real_data({home_name}, {away_name}) -> api_ok={api_ok} source={source_str} confidence={confidence} home_db={home_db_ok} away_db={away_db_ok} home_apif={ht_apif is not None} away_apif={at_apif is not None}")
     return result
 
-# Prompt builder
+# ─────────────────────────────────────────────────────────────────────────
+# Motor deterministico de condiciones
+# ─────────────────────────────────────────────────────────────────────────
+# Antes esto se lo pediamos al LLM: le pasabamos el volcado de datos en texto
+# y tenia que leerlo, decidir si/no para cada una de las 12 condiciones,
+# sumar los pesos y calcular el %. Eso gastaba tokens (de entrada y de
+# salida) en algo que es aritmetica pura sobre datos que YA estan calculados
+# aqui abajo en Python, y dejaba una decision binaria en manos de un modelo
+# de lenguaje en vez de una regla fija y repetible. Ahora se calcula en esta
+# funcion; el LLM (ver _render_report) solo redacta el resultado, nunca lo
+# decide.
+#
+# Para btts / over25 / home_goals / away_goals / corners_over85 / cards_over35
+# se usa el modelo estadistico Poisson + calibracion Platt ya validado (ver
+# poisson_calibrated_probs mas abajo) cuando hay datos suficientes en la BD.
+# El resto de condiciones (y esas mismas cuando el modelo no tiene datos
+# suficientes) usan un umbral simple sobre las medias ya calculadas en
+# build_real_data -- no son un modelo validado con backtesting, son la misma
+# clase de heuristica que antes hacia el LLM "a ojo", solo que ahora es
+# reproducible y testeable.
+
+
+def _parse_result_letter(res: str) -> str | None:
+    """'OK1-0 Barce' -> 'W' ; 'EQ1-1 Betis' -> 'D' ; 'NO0-2 Betis' -> 'L'."""
+    if not res:
+        return None
+    if res.startswith("OK"):
+        return "W"
+    if res.startswith("EQ"):
+        return "D"
+    if res.startswith("NO"):
+        return "L"
+    return None
+
+
+def _parse_result_goals(res: str) -> tuple[int, int] | None:
+    """'OK2-1 Betis' -> (2, 1) : (goles a favor, goles en contra)."""
+    m = re.match(r"^(?:OK|EQ|NO)(\d+)-(\d+)", res or "")
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _form_points(results: list[str]) -> int:
+    pts = {"W": 3, "D": 1, "L": 0}
+    return sum(pts.get(_parse_result_letter(r), 0) for r in results)
+
+
+def _clean_sheet_in_last3(results: list[str]) -> bool:
+    for res in (results or [])[:3]:
+        parsed = _parse_result_goals(res)
+        if parsed and parsed[1] == 0:
+            return True
+    return False
+
+
+def _h2h_both_score_ratio(h2h: list[dict]) -> tuple[int, int] | None:
+    total = 0
+    both = 0
+    for fix in (h2h or [])[:5]:
+        gh = fix.get("goals", {}).get("home")
+        ga = fix.get("goals", {}).get("away")
+        if gh is None or ga is None:
+            continue
+        total += 1
+        if gh > 0 and ga > 0:
+            both += 1
+    return (both, total) if total else None
+
+
+def evaluate_conditions(home: str, away: str, conditions: list[dict], data: dict) -> dict:
+    """Decide si/no para cada condicion y la puntuacion total sin llamar al
+    LLM. Devuelve {"items", "score", "max_pts", "pct", "verdict", "stat_probs"}.
+    Cada item: {"id","label","weight","status" (bool), "reason"}. Si no hay
+    datos suficientes para una condicion se marca status=False con motivo
+    "Datos insuficientes" -- igual que haria un analista sin evidencia para
+    respaldarla, nunca se inventa un "si"."""
+    hd = data.get("home_data") or {}
+    ad = data.get("away_data") or {}
+    h_home = hd.get("home", {}) or {}
+    a_away = ad.get("away", {}) or {}
+    home_results = h_home.get("results") or []
+    away_results = a_away.get("results") or []
+
+    stat_probs = poisson_calibrated_probs(home, away)
+    results: dict[str, tuple[bool, str]] = {}
+
+    def from_stat_or(cond_id, fallback):
+        prob = stat_probs.get(cond_id)
+        if prob is not None:
+            return prob >= 50, f"Modelo estadistico calibrado: {prob:.0f}% de probabilidad"
+        return fallback
+
+    gf_h, gf_a = h_home.get("gf"), a_away.get("gf")
+
+    if gf_h is not None and gf_a is not None:
+        fallback_btts = (gf_h >= 1.0 and gf_a >= 1.0, f"Medias: {gf_h} / {gf_a} goles marcados")
+        fallback_over25 = (gf_h + gf_a > 2.5, f"Media combinada estimada: {round(gf_h + gf_a, 1)}")
+        fallback_over15 = (gf_h + gf_a > 1.5, f"Media combinada estimada: {round(gf_h + gf_a, 1)}")
+    else:
+        fallback_btts = fallback_over25 = fallback_over15 = (False, "Datos insuficientes")
+
+    results["btts"] = from_stat_or("btts", fallback_btts)
+    results["over25"] = from_stat_or("over25", fallback_over25)
+    results["over15"] = fallback_over15  # sin modelo Platt propio validado
+
+    if gf_h is not None:
+        results["home_goals"] = from_stat_or("home_goals", (gf_h > 1.5, f"Media local en casa: {gf_h}"))
+    else:
+        results["home_goals"] = from_stat_or("home_goals", (False, "Datos insuficientes"))
+
+    if gf_a is not None:
+        results["away_goals"] = from_stat_or("away_goals", (gf_a > 1.5, f"Media visitante fuera: {gf_a}"))
+    else:
+        results["away_goals"] = from_stat_or("away_goals", (False, "Datos insuficientes"))
+
+    c_h, c_a = h_home.get("corners"), a_away.get("corners")
+    if c_h is not None and c_a is not None:
+        results["corners_over85"] = from_stat_or("corners_over85", (c_h + c_a > 8.5, f"Media combinada de corners: {round(c_h + c_a, 1)}"))
+    else:
+        results["corners_over85"] = from_stat_or("corners_over85", (False, "Datos insuficientes"))
+
+    j_h, j_a = h_home.get("cards"), a_away.get("cards")
+    if j_h is not None and j_a is not None:
+        results["cards_over35"] = from_stat_or("cards_over35", (j_h + j_a > 3.5, f"Media combinada de tarjetas: {round(j_h + j_a, 1)}"))
+    else:
+        results["cards_over35"] = from_stat_or("cards_over35", (False, "Datos insuficientes"))
+
+    ga_a = a_away.get("ga")
+    if ga_a is not None:
+        results["away_concede"] = (ga_a >= 1.3, f"Media encajada fuera: {ga_a}")
+    else:
+        results["away_concede"] = (False, "Datos insuficientes")
+
+    if home_results:
+        unbeaten = all(_parse_result_letter(r) != "L" for r in home_results)
+        results["home_unbeaten"] = (unbeaten, f"{'Sin derrotas' if unbeaten else 'Con derrotas'} en sus ultimos {len(home_results)} como local")
+    else:
+        results["home_unbeaten"] = (False, "Datos insuficientes")
+
+    if home_results or away_results:
+        cs = _clean_sheet_in_last3(home_results) or _clean_sheet_in_last3(away_results)
+        results["clean_sheet"] = (cs, "Porteria a 0 en los ultimos 3 de alguno de los dos equipos" if cs else "Sin porterias a 0 en los ultimos 3")
+    else:
+        results["clean_sheet"] = (False, "Datos insuficientes")
+
+    if home_results and away_results:
+        home_pts, away_pts = _form_points(home_results), _form_points(away_results)
+        results["home_form"] = (home_pts > away_pts, f"Puntos recientes: local {home_pts} vs visitante {away_pts}")
+    else:
+        results["home_form"] = (False, "Datos insuficientes")
+
+    ratio = _h2h_both_score_ratio(data.get("h2h"))
+    if ratio:
+        both, total = ratio
+        results["h2h_goals"] = (both > total / 2, f"{both}/{total} enfrentamientos con ambos marcando")
+    else:
+        results["h2h_goals"] = (False, "Datos insuficientes")
+
+    items = []
+    score = 0
+    max_pts = 0
+    for c in conditions:
+        status, reason = results.get(c["id"], (False, "Datos insuficientes"))
+        max_pts += c["weight"]
+        if status:
+            score += c["weight"]
+        items.append({"id": c["id"], "label": c["label"], "weight": c["weight"], "status": status, "reason": reason})
+
+    pct = round(100 * score / max_pts) if max_pts else 0
+    if pct >= 70:
+        verdict = "FAVORABLE"
+    elif pct >= 50:
+        verdict = "DUDOSO"
+    else:
+        verdict = "NO RECOMENDABLE"
+
+    return {"items": items, "score": score, "max_pts": max_pts, "pct": pct, "verdict": verdict, "stat_probs": stat_probs}
+
+
+# Prompt builder (solo se usa cuando NO hay datos propios ni de APIs -- ver
+# _render_report_no_data -- porque en ese caso no hay nada fiable que
+# precalcular y el LLM tiene que buscar y redactar el informe entero)
 
 def build_prompt(home: str, away: str, conditions: list[dict], data: dict, match_date: str | None = None) -> str:
     now = datetime.now().strftime("%d/%m/%Y")
@@ -637,12 +819,157 @@ def build_prompt(home: str, away: str, conditions: list[dict], data: dict, match
     return "\n".join(prompt_parts)
 
 
-async def analyze_match(home: str, away: str, conditions: list[dict] | None = None, match_date: str | None = None) -> str:
-    if conditions is None:
-        conditions = DEFAULT_CONDITIONS
+# ─────────────────────────────────────────────────────────────────────────
+# Redaccion del informe final
+# ─────────────────────────────────────────────────────────────────────────
+# El contenido numerico (datos, condiciones, puntuacion, veredicto) ya esta
+# decidido por evaluate_conditions. El LLM solo entra para dos cosas que de
+# verdad requieren "saber algo" en vez de calcular: el nombre de la
+# competicion (si la conoce) y una frase de conclusion. Prompt y max_tokens
+# minimos porque no necesita ver el volcado de datos completo ni reglas
+# anti-invencion de estadisticas -- no calcula nada.
 
-    data = await build_real_data(home, away)
+def _format_team_report_line(name: str, td: dict | None, role: str) -> str:
+    if not td:
+        return f"*{name}* - sin datos disponibles"
+    own = td.get(role, {}) or {}
+    res_str = " ".join(own.get("results", [])) or "sin datos"
+    gf, ga = nd(own.get("gf")), nd(own.get("ga"))
+    extras = []
+    if own.get("corners") is not None:
+        extras.append(f"Corners: {own['corners']}")
+    if own.get("shots") is not None:
+        extras.append(f"Disparos: {own['shots']}")
+    if own.get("cards") is not None:
+        extras.append(f"Tarj: {own['cards']}")
+    extras_str = (" | " + " | ".join(extras)) if extras else ""
+    label = "casa" if role == "home" else "fuera"
+    return f"*{name}* - {res_str}\nGoles {label}: {gf} marc / {ga} enc{extras_str}"
 
+
+def _format_h2h_line(h2h: list | None) -> str:
+    if not h2h:
+        return "*H2H* - sin enfrentamientos recientes en las fuentes disponibles"
+    lines, goals = [], []
+    for fix in h2h[:3]:
+        gh, ga = fix["goals"]["home"], fix["goals"]["away"]
+        d = fix["fixture"]["date"][:10]
+        hn = fix["teams"]["home"]["name"][:8]
+        an = fix["teams"]["away"]["name"][:8]
+        lines.append(f"{d} {hn} {gh}-{ga} {an}")
+        if gh is not None and ga is not None:
+            goals.append(gh + ga)
+    return f"*H2H* - {' | '.join(lines)} - media goles: {nd(avg(goals))}"
+
+
+def _format_condition_lines(evaluation: dict) -> str:
+    lines = []
+    for item in evaluation["items"]:
+        mark = "Si" if item["status"] else "No"
+        lines.append(f"{mark} {item['label']} - {item['reason']}")
+    return "\n".join(lines)
+
+
+def _confidence_banner_footer(data: dict, now: str) -> tuple[str, str]:
+    confidence = data.get("confidence", "low")
+    if confidence == "high":
+        return "", f"_{data.get('source', 'Base de datos propia')} - {now}_"
+    if confidence == "medium":
+        return (
+            "DATOS PARCIALES: solo un equipo con datos completos. Evalua las condiciones con cautela.\n\n",
+            f"_Datos parciales - {data.get('source', '')} - {now}_",
+        )
+    return (
+        "DATOS NO VERIFICADOS: sin cobertura suficiente para un analisis fiable.\n\n",
+        f"_Datos no verificados - {now}_",
+    )
+
+
+async def _ask_competition_and_conclusion(home: str, away: str, evaluation: dict, confidence: str) -> tuple[str, str]:
+    """Unica llamada al LLM del flujo normal (con datos propios). No decide
+    ninguna cifra ni ningun si/no: solo aporta el nombre de la competicion
+    (si la conoce) y una frase de conclusion corta. Si falla, se devuelve
+    ("", "") y _render_report cae a una conclusion generica basada en el
+    veredicto ya calculado -- el informe nunca se rompe por esto."""
+    cumplen = [it["label"] for it in evaluation["items"] if it["status"]]
+    no_cumplen = [it["label"] for it in evaluation["items"] if not it["status"]]
+
+    prompt = (
+        f"Partido: {home} vs {away}\n"
+        f"Resultado YA CALCULADO (no lo recalcules, solo redacta): "
+        f"{evaluation['score']}/{evaluation['max_pts']} pts ({evaluation['pct']}%) -> {evaluation['verdict']}\n"
+        f"Confianza de los datos: {confidence}\n"
+        f"Condiciones que SI se cumplen: {', '.join(cumplen) or 'ninguna'}\n"
+        f"Condiciones que NO se cumplen: {', '.join(no_cumplen) or 'ninguna'}\n\n"
+        "Responde EXCLUSIVAMENTE con un JSON de una linea, sin bloque de codigo ni texto adicional:\n"
+        '{"competition":"<liga o torneo del partido si lo conoces, si no cadena vacia>",'
+        '"conclusion":"<1 frase breve en espanol resumiendo el mercado mas avalado por el veredicto>"}'
+    )
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    body = {
+        "model": "claude-sonnet-5",
+        "max_tokens": 150,
+        "thinking": {"type": "disabled"},
+        "messages": [{"role": "user", "content": prompt}],
+        "system": "Devuelves siempre JSON valido de una sola linea, sin texto extra ni bloques de codigo.",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(ANTHROPIC_URL, headers=headers, json=body)
+            r.raise_for_status()
+            data_r = r.json()
+            text = "".join(b["text"] for b in data_r.get("content", []) if b.get("type") == "text").strip()
+            text = re.sub(r"^```(json)?", "", text).strip()
+            text = re.sub(r"```$", "", text).strip()
+            parsed = json.loads(text)
+            return str(parsed.get("competition") or "").strip(), str(parsed.get("conclusion") or "").strip()
+    except Exception as e:
+        print(f"[DEBUG] _ask_competition_and_conclusion FALLO: {type(e).__name__}: {e}")
+        return "", ""
+
+
+async def _render_report(home: str, away: str, data: dict, evaluation: dict, match_date: str | None = None) -> str:
+    now = datetime.now().strftime("%d/%m/%Y")
+    display_date = match_date or now
+    confidence = data.get("confidence", "low")
+    banner, footer = _confidence_banner_footer(data, now)
+
+    competition, conclusion = await _ask_competition_and_conclusion(home, away, evaluation, confidence)
+    comp_line = f"_{competition} - {display_date}_" if competition else f"_{display_date}_"
+    if not conclusion:
+        conclusion = f"Veredicto: {evaluation['verdict'].lower()} segun los datos disponibles."
+
+    parts = [
+        f"{banner}*{home.upper()} vs {away.upper()}*",
+        comp_line,
+        "",
+        _format_team_report_line(home, data.get("home_data"), "home"),
+        "",
+        _format_team_report_line(away, data.get("away_data"), "away"),
+        "",
+        _format_h2h_line(data.get("h2h")),
+        "",
+        "----------------",
+        "*Condiciones*",
+        _format_condition_lines(evaluation),
+        "",
+        f"*{evaluation['score']}/{evaluation['max_pts']} pts - {evaluation['pct']}%*",
+        evaluation["verdict"],
+        "",
+        conclusion,
+        footer,
+    ]
+    return "\n".join(parts)
+
+
+async def _render_report_no_data(home: str, away: str, conditions: list[dict], data: dict, match_date: str | None = None) -> str:
+    """Sin datos propios ni de APIs (api_ok=False): no hay nada fiable que
+    precalcular en Python, asi que mantenemos el flujo completo original --
+    el LLM arma el informe entero apoyandose en web_search."""
     prompt = build_prompt(home, away, conditions, data, match_date)
 
     headers = {
@@ -650,7 +977,6 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
-
     body = {
         "model": "claude-sonnet-5",
         "max_tokens": 1500,
@@ -663,12 +989,10 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
             "Si no tienes un dato, no lo menciones. "
             "Formato Markdown Telegram. Respuestas concisas."
         ),
+        "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 4}],
     }
 
-    if not data["api_ok"]:
-        body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 4}]
-
-    print(f"[DEBUG] Llamando a Anthropic. ANTHROPIC_API_KEY presente: {bool(ANTHROPIC_API_KEY)} (len={len(ANTHROPIC_API_KEY)})")
+    print(f"[DEBUG] Llamando a Anthropic (sin datos propios). ANTHROPIC_API_KEY presente: {bool(ANTHROPIC_API_KEY)} (len={len(ANTHROPIC_API_KEY)})")
 
     try:
         async with httpx.AsyncClient(timeout=120) as client:
@@ -692,159 +1016,17 @@ async def analyze_match(home: str, away: str, conditions: list[dict] | None = No
         return "Error inesperado. Revisa los logs del servidor."
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# PICKS DIARIOS: analisis con probabilidad estructurada por condicion
-# (para el ranking global de "mejores picks del dia" en el scheduler)
-# ─────────────────────────────────────────────────────────────────────────
+async def analyze_match(home: str, away: str, conditions: list[dict] | None = None, match_date: str | None = None) -> str:
+    if conditions is None:
+        conditions = DEFAULT_CONDITIONS
 
-PICKS_JSON_MARKER = "===PICKS_JSON==="
+    data = await build_real_data(home, away)
 
+    if not data["api_ok"]:
+        return await _render_report_no_data(home, away, conditions, data, match_date)
 
-def build_prompt_with_picks(home: str, away: str, conditions: list[dict], data: dict, match_date: str | None = None) -> str:
-    """Igual que build_prompt(), pero pide ademas un bloque JSON al final con
-    la probabilidad estimada (0-100) de cada condicion, para poder rankear
-    picks de todos los partidos del dia entre si."""
-    base_prompt = build_prompt(home, away, conditions, data, match_date)
-    picks_instruction = (
-        "\n\n----------------\n"
-        "Ademas de todo lo anterior, en una NUEVA linea aparte escribe EXACTAMENTE:\n"
-        f"{PICKS_JSON_MARKER}\n"
-        "seguido de un JSON valido en UNA sola linea (sin texto adicional, sin bloques de "
-        "codigo, sin comentarios) con este formato exacto:\n"
-        '[{"id":"btts","probability":82,"reason":"breve motivo en 1 frase basado SOLO en los datos reales"}]\n'
-        "Incluye SOLO las condiciones de la lista de arriba cuya probabilidad estimes en 60 o mas. "
-        "Usa exactamente el mismo 'id' que aparece en la lista de condiciones a evaluar. "
-        "El campo 'probability' es tu estimacion, en entero de 0 a 100, de que esa condicion se "
-        "cumpla en este partido concreto, basandote UNICAMENTE en los datos reales proporcionados "
-        "(nunca en la cuota de una casa de apuestas). "
-        "Si ninguna condicion alcanza 60, escribe exactamente: []\n\n"
-        "REGLAS CRITICAS para evitar contradicciones (revisalas antes de escribir el JSON):\n"
-        "1. Las cifras del 'reason' deben ser EXACTAMENTE las mismas que ya escribiste en el "
-        "informe de arriba (mismos decimales, mismo dato). Nunca redondees, aproximes ni "
-        "inventes una cifra nueva de memoria: copiala literalmente.\n"
-        "2. Antes de dar probabilidad >=60 a una condicion con umbral numerico (ej. 'mas de 1.5 "
-        "goles'), comprueba tu mismo si la cifra citada en el 'reason' SUPERA de verdad ese "
-        "umbral. Si no lo supera claramente, esa condicion NO puede tener probabilidad >=60.\n"
-        "3. No uses palabras absolutas ('todos', 'todas', 'siempre', 'nunca') en el 'reason' "
-        "salvo que sea literalmente el 100% de los partidos disponibles. Si es la mayoria pero "
-        "no todos, dilo como fraccion exacta (ej. '4 de 5 partidos').\n"
-        "4. Para 'corners_over85' y 'cards_over35': estos mercados estan validados por "
-        "backtesting propio (sobre mas de 1000 partidos reales) y calibran tan bien como "
-        "'Mas de 2.5 goles'. Si la suma de las medias de corners (o tarjetas) de ambos equipos "
-        "supera el umbral (8.5 o 3.5 respectivamente), trata eso como una senal fiable: no seas "
-        "mas conservador con estas dos condiciones que con las de goles. Asigna probabilidad "
-        "65-80 cuando la suma supere el umbral con margen razonable (mas de un 5%), salvo que "
-        "algo concreto en los datos de ESE partido (muestra muy pequena, equipo claramente "
-        "atipico) te haga dudar."
-    )
-    return base_prompt + picks_instruction
-
-
-def _parse_picks_json(raw_text: str) -> tuple[str, list[dict]]:
-    """Separa la respuesta de Claude en (texto_informe, lista_de_picks).
-    Si falta el marcador o el JSON es invalido, devuelve el texto tal cual
-    y una lista vacia (nunca rompe el envio del informe normal)."""
-    if PICKS_JSON_MARKER not in raw_text:
-        return raw_text.strip(), []
-
-    report_part, _, json_part = raw_text.partition(PICKS_JSON_MARKER)
-    report_part = report_part.strip()
-    json_part = json_part.strip()
-
-    # Por si Claude envuelve el JSON en un bloque de codigo pese a la instruccion
-    json_part = re.sub(r"^```(json)?", "", json_part).strip()
-    json_part = re.sub(r"```$", "", json_part).strip()
-
-    try:
-        picks_raw = json.loads(json_part)
-        if not isinstance(picks_raw, list):
-            picks_raw = []
-    except (json.JSONDecodeError, ValueError):
-        print(f"[DEBUG] _parse_picks_json: JSON invalido: {json_part[:200]}")
-        picks_raw = []
-
-    cond_by_id = {c["id"]: c for c in DEFAULT_CONDITIONS}
-    clean_picks = []
-    for p in picks_raw:
-        if not isinstance(p, dict):
-            continue
-        pid = p.get("id")
-        if pid not in cond_by_id:
-            continue
-        try:
-            prob = int(p.get("probability"))
-        except (TypeError, ValueError):
-            continue
-        if not (0 <= prob <= 100):
-            continue
-        clean_picks.append({
-            "id": pid,
-            "label": cond_by_id[pid]["label"],
-            "probability": prob,
-            "reason": str(p.get("reason", "")).strip(),
-        })
-
-    return report_part, clean_picks
-
-
-# Numero minimo de partidos de historial (casa Y fuera) que exigimos antes de
-# dejar que un partido aporte picks al ranking diario. Con menos muestra que
-# esto, un pick de "alta confianza" es enganoso (ej. Kaizer Chiefs con 1 solo
-# partido de referencia) aunque el porcentaje que de Claude parezca solido.
-MIN_MATCHES_FOR_PICK = 3
-
-
-def _validate_picks_against_data(picks: list[dict], data: dict) -> list[dict]:
-    """Comprueba los picks contra los datos numericos YA CALCULADOS en Python
-    (no contra lo que Claude *dice* que calculo). Esto es una segunda barrera
-    independiente del prompt: aunque Claude marque una condicion como cumplida
-    por error, aqui se descarta si el propio dato no la respalda.
-
-    Tambien anota el tamano de muestra en cada pick para mostrarlo en el
-    mensaje final, y descarta TODOS los picks de un partido si la muestra de
-    partidos previos es demasiado pequena para fiarse."""
-    home_data = (data.get("home_data") or {}).get("home", {}) or {}
-    away_data = (data.get("away_data") or {}).get("away", {}) or {}
-    home_n = len(home_data.get("results") or [])
-    away_n = len(away_data.get("results") or [])
-
-    if home_n < MIN_MATCHES_FOR_PICK or away_n < MIN_MATCHES_FOR_PICK:
-        print(f"[DEBUG] _validate_picks_against_data: muestra insuficiente "
-              f"(casa={home_n}, fuera={away_n}, minimo={MIN_MATCHES_FOR_PICK}) - se descartan todos los picks")
-        return []
-
-    home_gf = home_data.get("gf")
-    away_gf = away_data.get("gf")
-    home_corners = home_data.get("corners")
-    away_corners = away_data.get("corners")
-    home_cards = home_data.get("cards")
-    away_cards = away_data.get("cards")
-    sample_str = f"{home_n} casa / {away_n} fuera"
-
-    validated = []
-    for p in picks:
-        pid = p["id"]
-        if pid == "home_goals" and home_gf is not None and home_gf <= 1.5:
-            print(f"[DEBUG] _validate_picks_against_data: pick 'home_goals' descartado "
-                  f"(dato real home_gf={home_gf}, no supera 1.5)")
-            continue
-        if pid == "away_goals" and away_gf is not None and away_gf <= 1.5:
-            print(f"[DEBUG] _validate_picks_against_data: pick 'away_goals' descartado "
-                  f"(dato real away_gf={away_gf}, no supera 1.5)")
-            continue
-        if pid == "corners_over85" and home_corners is not None and away_corners is not None \
-                and (home_corners + away_corners) < 8.5:
-            print(f"[DEBUG] _validate_picks_against_data: pick 'corners_over85' descartado "
-                  f"(dato real home_corners+away_corners={home_corners + away_corners}, no supera 8.5)")
-            continue
-        if pid == "cards_over35" and home_cards is not None and away_cards is not None \
-                and (home_cards + away_cards) < 3.5:
-            print(f"[DEBUG] _validate_picks_against_data: pick 'cards_over35' descartado "
-                  f"(dato real home_cards+away_cards={home_cards + away_cards}, no supera 3.5)")
-            continue
-        validated.append({**p, "sample": sample_str})
-
-    return validated
+    evaluation = evaluate_conditions(home, away, conditions, data)
+    return await _render_report(home, away, data, evaluation, match_date)
 
 
 # ---------------------------------------------------------------------------
@@ -1160,50 +1342,61 @@ def poisson_calibrated_probs(home: str, away: str) -> dict:
         return result
 
 
-def _apply_statistical_calibration(picks: list[dict], home: str, away: str) -> list[dict]:
-    """Sustituye (o anade) la probabilidad de btts / over25 / corners_over85
-    por la del modelo Poisson+Platt validado, en vez de dejar la estimacion
-    libre de Claude para esas 3 condiciones concretas. El resto de picks
-    (los que genera Claude a partir del texto) no se tocan.
+# Numero minimo de partidos de historial (casa Y fuera) que exigimos antes de
+# dejar que un partido aporte picks al ranking diario. Con menos muestra que
+# esto, un pick de "alta confianza" es enganoso (ej. Kaizer Chiefs con 1 solo
+# partido de referencia) aunque el porcentaje parezca solido.
+MIN_MATCHES_FOR_PICK = 3
 
-    Si el modelo estadistico no tiene datos suficientes para un equipo/liga
-    (por ejemplo, equipos nuevos con pocos partidos en la BD), esa condicion
-    se deja tal cual la devolvio Claude -- nunca se inventa un numero."""
-    stat_probs = poisson_calibrated_probs(home, away)
-    if not stat_probs:
-        return picks
 
-    labels = {c["id"]: c["label"] for c in DEFAULT_CONDITIONS}
-    ids_ya_presentes = {p["id"] for p in picks}
+def _derive_deterministic_picks(conditions: list[dict], data: dict, evaluation: dict) -> list[dict]:
+    """Picks para el ranking diario de mejores partidos: SOLO los mercados
+    con modelo estadistico validado (Poisson + calibracion Platt, ver
+    poisson_calibrated_probs). El resto de condiciones de evaluate_conditions
+    (home_form, h2h_goals, etc.) no tiene un numero calibrado detras --
+    mezclarlas aqui distorsionaria la comparativa entre partidos del dia,
+    aunque si aparecen en el informe individual de cada partido.
 
-    resultado = []
-    for p in picks:
-        if p["id"] in stat_probs:
-            p = {**p, "probability": stat_probs[p["id"]],
-                 "reason": p.get("reason", "") + " (probabilidad ajustada con el modelo estadistico validado)"}
-        resultado.append(p)
+    Antes esto se lo pediamos a Claude en un JSON aparte y despues se
+    validaba/sobreescribia contra estos mismos numeros calculados en Python
+    (ver commits anteriores). Ahora se usa el numero validado directamente,
+    sin pasar por el LLM en absoluto -- ni el calculo ni la validacion
+    posterior hacian falta ya."""
+    home_data = (data.get("home_data") or {}).get("home", {}) or {}
+    away_data = (data.get("away_data") or {}).get("away", {}) or {}
+    home_n = len(home_data.get("results") or [])
+    away_n = len(away_data.get("results") or [])
 
-    # Si el modelo estadistico ve una probabilidad alta en una condicion que
-    # Claude no incluyo, la anadimos -- exactamente el mismo tipo de hueco
-    # que corregimos hace unos dias para corners/tarjetas, ahora respaldado
-    # por un numero validado en vez de solo una instruccion en el prompt.
-    for cond_id, prob in stat_probs.items():
-        if cond_id not in ids_ya_presentes and prob >= 60 and cond_id in labels:
-            resultado.append({
-                "id": cond_id,
-                "label": labels[cond_id],
-                "probability": prob,
-                "reason": "Calculado con el modelo estadistico validado (Poisson + calibracion Platt).",
-            })
+    if home_n < MIN_MATCHES_FOR_PICK or away_n < MIN_MATCHES_FOR_PICK:
+        print(f"[DEBUG] _derive_deterministic_picks: muestra insuficiente "
+              f"(casa={home_n}, fuera={away_n}, minimo={MIN_MATCHES_FOR_PICK}) - se descartan todos los picks")
+        return []
 
-    return resultado
+    labels = {c["id"]: c["label"] for c in conditions}
+    sample_str = f"{home_n} casa / {away_n} fuera"
+    stat_probs = evaluation.get("stat_probs") or {}
+
+    return [
+        {
+            "id": cond_id,
+            "label": labels[cond_id],
+            "probability": prob,
+            "reason": "Calculado con el modelo estadistico validado (Poisson + calibracion Platt).",
+            "sample": sample_str,
+        }
+        for cond_id, prob in stat_probs.items()
+        if cond_id in labels and prob >= 60
+    ]
 
 
 async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] | None = None, match_date: str | None = None) -> tuple[str, list[dict]]:
-    """Como analyze_match(), pero en la MISMA llamada a Claude (sin coste
-    adicional de API) devuelve tambien una lista de picks estructurados:
-    [{"id","label","probability","reason"}, ...] para las condiciones con
-    probabilidad estimada alta. Pensada para el ranking diario de picks.
+    """Como analyze_match(), pero ademas devuelve picks estructurados
+    [{"id","label","probability","reason","sample"}, ...] para el ranking
+    diario de mejores partidos. Los picks salen directamente del modelo
+    estadistico validado (ver _derive_deterministic_picks), sin ninguna
+    llamada adicional al LLM -- comparten los mismos datos y la misma
+    evaluacion que ya calcula el informe, asi que no cuestan tokens extra
+    ni tiempo extra.
 
     match_date (opcional): fecha del kickoff en formato DD/MM/YYYY, ya
     convertida a hora Espana por quien llama (ver scheduler.py). Si no se
@@ -1212,73 +1405,12 @@ async def analyze_match_with_picks(home: str, away: str, conditions: list[dict] 
         conditions = DEFAULT_CONDITIONS
 
     data = await build_real_data(home, away)
-    prompt = build_prompt_with_picks(home, away, conditions, data, match_date)
-
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
-    body = {
-        "model": "claude-sonnet-5",
-        "max_tokens": 1700,
-        "thinking": {"type": "disabled"},
-        "messages": [{"role": "user", "content": prompt}],
-        "system": (
-            "Eres un analista deportivo experto en futbol. Respondes siempre en espanol. "
-            "Usas SOLO los datos reales proporcionados. "
-            "NUNCA inventes estadisticas, porcentajes ni promedios. "
-            "Si no tienes un dato, no lo menciones. "
-            "Formato Markdown Telegram. Respuestas concisas."
-        ),
-    }
 
     if not data["api_ok"]:
-        body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 4}]
+        report = await _render_report_no_data(home, away, conditions, data, match_date)
+        return report, []
 
-    print(f"[DEBUG] Llamando a Anthropic (con picks). ANTHROPIC_API_KEY presente: {bool(ANTHROPIC_API_KEY)}")
-
-    async def _fallback_to_plain_report(motivo: str) -> tuple[str, list[dict]]:
-        """Si la variante 'con picks' no consigue devolver texto util, caemos
-        a analyze_match() (la funcion original, probada y estable) para que
-        el informe del partido SIEMPRE llegue, aunque ese partido concreto se
-        quede sin picks. Mejor informe sin picks que ningun informe."""
-        print(f"[DEBUG] analyze_match_with_picks: fallback a analyze_match() por: {motivo}")
-        try:
-            report = await analyze_match(home, away, conditions)
-            return report, []
-        except Exception as e:
-            print(f"[DEBUG] Fallback a analyze_match() tambien fallo: {type(e).__name__}: {e}")
-            return "Error al generar el analisis. Intentalo de nuevo en unos segundos.", []
-
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(ANTHROPIC_URL, headers=headers, json=body)
-            print(f"[DEBUG] Anthropic status_code: {r.status_code}")
-            r.raise_for_status()
-            data_r = r.json()
-            text_parts = [
-                block["text"]
-                for block in data_r.get("content", [])
-                if block.get("type") == "text"
-            ]
-            if not text_parts:
-                stop_reason = data_r.get("stop_reason")
-                content_types = [b.get("type") for b in data_r.get("content", [])]
-                print(f"[DEBUG] Respuesta de Anthropic (con picks) sin texto. "
-                      f"stop_reason={stop_reason} content_types={content_types}")
-                return await _fallback_to_plain_report(
-                    f"sin bloques de texto (stop_reason={stop_reason}, content_types={content_types})"
-                )
-            raw = "\n".join(text_parts)
-            report, picks = _parse_picks_json(raw)
-            picks = _validate_picks_against_data(picks, data)
-            picks = _apply_statistical_calibration(picks, home, away)
-            return report, picks
-    except httpx.HTTPStatusError as e:
-        print(f"[DEBUG] Anthropic HTTPStatusError: {e.response.status_code} - {e.response.text}")
-        return await _fallback_to_plain_report(f"HTTPStatusError {e.response.status_code}")
-    except Exception as e:
-        print(f"[DEBUG] Unexpected error: {type(e).__name__}: {e}")
-        return await _fallback_to_plain_report(f"excepcion inesperada: {type(e).__name__}: {e}")
+    evaluation = evaluate_conditions(home, away, conditions, data)
+    report = await _render_report(home, away, data, evaluation, match_date)
+    picks = _derive_deterministic_picks(conditions, data, evaluation)
+    return report, picks
