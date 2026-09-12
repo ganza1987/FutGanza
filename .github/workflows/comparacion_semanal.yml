@@ -1,0 +1,32 @@
+name: Comparacion semanal de metodos de valor
+
+# Revision semanal (todos los martes) de como va el metodo de EV frente al
+# metodo de puntos porcentuales (ver MARGEN_EV en value_bets.py, sesion de
+# analisis "edge de mercado" del 2026-09-12). Manda un resumen por Telegram
+# interpretando los numeros -- logica pura en Python, sin LLM de por medio.
+on:
+  schedule:
+    - cron: '0 9 * * 2'   # Martes ~10:00-11:00 hora España (verano/invierno)
+  workflow_dispatch:
+
+jobs:
+  comparacion_semanal:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Comparar metodos y notificar por Telegram
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          NOTIFY_CHAT_IDS: ${{ secrets.NOTIFY_CHAT_IDS }}
+        run: python value_bets.py --resumen-semanal

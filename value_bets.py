@@ -881,57 +881,149 @@ def resumen_picks_en_vivo(conn):
         print("\nAun no hay ningun pick resuelto (todos siguen pendientes de jugarse).")
 
 
-def comparar_metodos_en_vivo(conn):
-    """Compara el rendimiento REAL (picks en vivo ya resueltos) del metodo
-    de puntos porcentuales vs el metodo de EV, ejecutandose en paralelo
-    desde el 2026-09-12 (ver MARGEN_EV). Pensado para revisar periodicamente
-    (ej. cada semana) como va evolucionando cada metodo con datos frescos,
-    antes de decidir si se sustituye el metodo de puntos por el de EV, se
-    mantienen los dos, o se descarta el de EV.
+def _stats_grupo(lista: list) -> dict | None:
+    """Aciertos/beneficio/ROI de un grupo de picks resueltos, o None si esta
+    vacio. Compartido entre la version de consola y la version que se manda
+    por Telegram para no desincronizar el calculo entre las dos."""
+    if not lista:
+        return None
+    n = len(lista)
+    aciertos = sum(1 for x in lista if x["resultado"] == "hit")
+    beneficio = sum((float(x["mejor_cuota"]) - 1) if x["resultado"] == "hit" else -1 for x in lista)
+    return {"n": n, "aciertos": aciertos, "pct": 100 * aciertos / n,
+            "beneficio": beneficio, "roi": 100 * beneficio / n}
 
-    Las filas anteriores a esa fecha tienen pasa_pp/pasa_ev en NULL (no
+
+def _calcular_comparacion(conn) -> dict:
+    """Trae los picks en vivo ya resueltos y los agrupa por que metodo(s)
+    los selecciono. Ver MARGEN_EV para el porque de esta comparacion.
+    Las filas anteriores al 2026-09-12 tienen pasa_pp/pasa_ev en NULL (no
     existian estas columnas) y se excluyen de la comparacion por metodo,
     aunque cuentan en el total general."""
     crear_tabla_value_picks(conn)
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("SELECT * FROM value_picks_historial WHERE resultado IN ('hit', 'miss') ORDER BY fecha_deteccion")
     resueltos = cur.fetchall()
-
     con_metodo = [f for f in resueltos if f["pasa_pp"] is not None]
-    sin_metodo = len(resueltos) - len(con_metodo)
-
-    print(f"{'='*70}\nCOMPARACION DE METODOS (picks en vivo ya resueltos)\n{'='*70}")
-    print(f"Total resueltos: {len(resueltos)}  |  Sin dato de metodo (previos a la comparacion): {sin_metodo}")
-
-    if not con_metodo:
-        print("\nTodavia no hay ningun pick resuelto con ambos metodos calculados. "
-              "Vuelve a mirar cuando se hayan jugado mas partidos.")
-        return
-
-    def resumen(nombre, lista):
-        if not lista:
-            print(f"\n{nombre}: sin datos todavia.")
-            return
-        n = len(lista)
-        aciertos = sum(1 for x in lista if x["resultado"] == "hit")
-        beneficio = sum((float(x["mejor_cuota"]) - 1) if x["resultado"] == "hit" else -1 for x in lista)
-        roi = 100 * beneficio / n
-        print(f"\n{nombre}: {n} apuestas  |  {aciertos} aciertos ({100*aciertos/n:.1f}%)  |  "
-              f"Beneficio: {beneficio:+.2f}u  |  ROI: {roi:+.1f}%")
 
     solo_pp = [f for f in con_metodo if f["pasa_pp"] and not f["pasa_ev"]]
     solo_ev = [f for f in con_metodo if f["pasa_ev"] and not f["pasa_pp"]]
     ambos = [f for f in con_metodo if f["pasa_pp"] and f["pasa_ev"]]
 
-    resumen("Solo metodo de PUNTOS (pp>15, no cumple EV>10%)", solo_pp)
-    resumen("Solo metodo de EV (EV>10%, no cumple pp>15)", solo_ev)
-    resumen("Ambos metodos coinciden", ambos)
-    resumen("TODO lo seleccionado por puntos (solo_pp + ambos)", solo_pp + ambos)
-    resumen("TODO lo seleccionado por EV (solo_ev + ambos)", solo_ev + ambos)
+    return {
+        "total_resueltos": len(resueltos),
+        "sin_metodo": len(resueltos) - len(con_metodo),
+        "con_metodo": len(con_metodo),
+        "solo_pp": _stats_grupo(solo_pp),
+        "solo_ev": _stats_grupo(solo_ev),
+        "ambos": _stats_grupo(ambos),
+        "total_pp": _stats_grupo(solo_pp + ambos),
+        "total_ev": _stats_grupo(solo_ev + ambos),
+    }
 
-    if len(con_metodo) < 30:
-        print(f"\nAVISO: solo {len(con_metodo)} picks resueltos con ambos metodos calculados. "
+
+def comparar_metodos_en_vivo(conn):
+    """Compara el rendimiento REAL (picks en vivo ya resueltos) del metodo
+    de puntos porcentuales vs el metodo de EV, ejecutandose en paralelo
+    desde el 2026-09-12 (ver MARGEN_EV). Pensado para revisar periodicamente
+    (ej. cada semana) como va evolucionando cada metodo con datos frescos,
+    antes de decidir si se sustituye el metodo de puntos por el de EV, se
+    mantienen los dos, o se descarta el de EV."""
+    c = _calcular_comparacion(conn)
+
+    print(f"{'='*70}\nCOMPARACION DE METODOS (picks en vivo ya resueltos)\n{'='*70}")
+    print(f"Total resueltos: {c['total_resueltos']}  |  Sin dato de metodo (previos a la comparacion): {c['sin_metodo']}")
+
+    if not c["con_metodo"]:
+        print("\nTodavia no hay ningun pick resuelto con ambos metodos calculados. "
+              "Vuelve a mirar cuando se hayan jugado mas partidos.")
+        return
+
+    def imprimir(nombre, s):
+        if not s:
+            print(f"\n{nombre}: sin datos todavia.")
+            return
+        print(f"\n{nombre}: {s['n']} apuestas  |  {s['aciertos']} aciertos ({s['pct']:.1f}%)  |  "
+              f"Beneficio: {s['beneficio']:+.2f}u  |  ROI: {s['roi']:+.1f}%")
+
+    imprimir("Solo metodo de PUNTOS (pp>15, no cumple EV>10%)", c["solo_pp"])
+    imprimir("Solo metodo de EV (EV>10%, no cumple pp>15)", c["solo_ev"])
+    imprimir("Ambos metodos coinciden", c["ambos"])
+    imprimir("TODO lo seleccionado por puntos (solo_pp + ambos)", c["total_pp"])
+    imprimir("TODO lo seleccionado por EV (solo_ev + ambos)", c["total_ev"])
+
+    if c["con_metodo"] < 30:
+        print(f"\nAVISO: solo {c['con_metodo']} picks resueltos con ambos metodos calculados. "
               "Todavia es pronto para sacar conclusiones -- sigue acumulando y vuelve a mirar.")
+
+
+# Muestra minima por metodo antes de siquiera insinuar que uno va mejor que
+# el otro en el resumen semanal -- por debajo de esto, cualquier diferencia
+# de ROI es mas probable que sea ruido que una señal real.
+MUESTRA_MINIMA_RECOMENDACION = 30
+# Diferencia de ROI (puntos) a partir de la cual el resumen semanal se
+# atreve a decir "X va mejor" en vez de "van parecidos".
+DIFERENCIA_ROI_NOTABLE = 10.0
+
+
+def enviar_resumen_semanal_telegram(conn):
+    """Pensado para la tarea programada semanal (ver
+    .github/workflows/comparacion_semanal.yml): calcula la comparacion de
+    metodos y el resumen general de picks en vivo, y manda un mensaje de
+    Telegram en espanol interpretando los numeros -- sin usar ningun LLM,
+    es pura logica sobre datos ya calculados, igual que el resto del
+    proyecto. Si no hay TELEGRAM_TOKEN/NOTIFY_CHAT_IDS configurados,
+    notificar_telegram() simplemente no hace nada (no es un error)."""
+    c = _calcular_comparacion(conn)
+
+    lineas = ["📊 *Revision semanal: puntos vs EV*\n"]
+
+    if not c["con_metodo"]:
+        lineas.append(
+            f"Todavia no hay ningun pick resuelto desde que arranco la comparacion "
+            f"({c['total_resueltos']} resueltos en total, todos de antes del 2026-09-12). "
+            "Vuelve la semana que viene."
+        )
+        mensaje = "\n".join(lineas)
+        print(mensaje)
+        notificar_telegram(mensaje)
+        return
+
+    def linea_stats(nombre, s):
+        if not s:
+            return f"*{nombre}*: sin datos todavia"
+        return f"*{nombre}*: {s['n']} apuestas, {s['pct']:.0f}% aciertos, ROI {s['roi']:+.1f}%"
+
+    lineas.append(linea_stats("Metodo PUNTOS (edge>15pp)", c["total_pp"]))
+    lineas.append(linea_stats("Metodo EV (EV>10%)", c["total_ev"]))
+    lineas.append(linea_stats("Coinciden ambos", c["ambos"]))
+    lineas.append("")
+
+    if c["con_metodo"] < MUESTRA_MINIMA_RECOMENDACION:
+        lineas.append(
+            f"⚠️ Solo {c['con_metodo']} picks resueltos con los dos metodos calculados "
+            f"(minimo para fiarse: {MUESTRA_MINIMA_RECOMENDACION}). Es pronto para sacar "
+            "conclusiones -- toca seguir esperando."
+        )
+    else:
+        roi_pp = c["total_pp"]["roi"] if c["total_pp"] else None
+        roi_ev = c["total_ev"]["roi"] if c["total_ev"] else None
+        if roi_pp is None or roi_ev is None:
+            lineas.append("Uno de los dos metodos todavia no tiene apuestas resueltas propias -- toca seguir esperando.")
+        else:
+            diferencia = roi_pp - roi_ev
+            if abs(diferencia) < DIFERENCIA_ROI_NOTABLE:
+                lineas.append(f"Van parecidos (diferencia de {abs(diferencia):.1f} puntos de ROI). Seguimos observando.")
+            elif diferencia > 0:
+                lineas.append(f"👉 De momento PUNTOS va mejor que EV (+{diferencia:.1f} puntos de ROI de diferencia), "
+                               "pero con esta muestra podria cambiar -- no lo tomes como definitivo todavia.")
+            else:
+                lineas.append(f"👉 De momento EV va mejor que PUNTOS (+{abs(diferencia):.1f} puntos de ROI de diferencia), "
+                               "pero con esta muestra podria cambiar -- no lo tomes como definitivo todavia.")
+
+    mensaje = "\n".join(lineas)
+    print(mensaje)
+    notificar_telegram(mensaje)
 
 
 def main():
@@ -945,6 +1037,8 @@ def main():
                          help="Muestra el rendimiento acumulado de los picks en vivo ya guardados (aciertos, ROI), sin buscar nuevos.")
     parser.add_argument("--comparar", action="store_true",
                          help="Compara el rendimiento real del metodo de puntos vs el metodo de EV (ver MARGEN_EV), corriendo en paralelo desde 2026-09-12.")
+    parser.add_argument("--resumen-semanal", action="store_true",
+                         help="Como --comparar, pero ademas manda un mensaje de Telegram interpretando los numeros. Pensado para la tarea programada semanal.")
     parser.add_argument("--margen", type=float, default=None,
                          help=f"Margen de seguridad en puntos porcentuales (por defecto {MARGEN_SEGURIDAD_PP}).")
     args = parser.parse_args()
@@ -961,6 +1055,8 @@ def main():
             resumen_picks_en_vivo(conn)
         elif args.comparar:
             comparar_metodos_en_vivo(conn)
+        elif args.resumen_semanal:
+            enviar_resumen_semanal_telegram(conn)
         elif args.backtest:
             modo_backtest(conn)
         else:
