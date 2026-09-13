@@ -16,6 +16,7 @@ from analyzer import analyze_match, analyze_match_with_picks
 from bot_handler import send_message, split_message
 from database import add_pick, get_pending_picks_to_verify, update_pick_result
 from odds_handler import fetch_and_store_odds, guardar_partido_pendiente
+import value_bets
 
 logger = logging.getLogger(__name__)
 
@@ -446,10 +447,43 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
 
 async def send_daily_ligas_con_datos_analysis():
     await send_daily_analysis(LIGAS_CON_DATOS, "Ligas con datos", "📊")
+    await _ejecutar_deteccion_de_valor()
 
 
 async def send_daily_ligas_con_datos_analysis_mediodia():
     await send_daily_analysis(LIGAS_CON_DATOS, "Ligas con datos (repaso mediodía)", "📊")
+    await _ejecutar_deteccion_de_valor()
+
+
+async def _ejecutar_deteccion_de_valor():
+    """Corre value_bets.py justo despues de mandar el analisis del ciclo
+    (06:00 o 12:30), en vez de esperar al cron de GitHub Actions -- ese cron
+    se retrasa entre 3 y 5 horas y media de forma variable dia a dia (ver
+    sesion de analisis "ajustar horario edge", 2026-09-13), justo cuando las
+    lineas de las casas de apuestas todavia se estan moviendo. Este proceso
+    (scheduler.py) SI dispara con precision a las 06:00/12:30 hora Espana
+    porque corre en un bucle propio en Railway, no en un cron externo.
+
+    value_bets.py usa psycopg2 (sincrono), asi que se ejecuta en un hilo
+    aparte con asyncio.to_thread para no bloquear el resto del event loop
+    (los webhooks de Telegram siguen respondiendo mientras tanto).
+
+    El workflow de GitHub Actions (value_bets_diario.yml) se deja tal cual
+    como red de seguridad -- si este proceso se reinicia justo en mitad del
+    ciclo y se pierde esta llamada, el cron (aunque tarde) lo acaba
+    cubriendo igualmente. Gracias a la deduplicacion por partido+mercado,
+    correr los dos no genera avisos duplicados."""
+    def _run():
+        conn = value_bets.get_conn()
+        try:
+            value_bets.modo_en_vivo(conn)  # ya verifica pendientes como primer paso
+        finally:
+            conn.close()
+
+    try:
+        await asyncio.to_thread(_run)
+    except Exception as e:
+        logger.error(f"Error ejecutando deteccion de valor tras el analisis: {e}")
 
 
 async def start_scheduler():
