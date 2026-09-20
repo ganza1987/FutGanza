@@ -73,20 +73,52 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 NOTIFY_CHAT_IDS = [c.strip() for c in os.getenv("NOTIFY_CHAT_IDS", "").split(",") if c.strip()]
 
 
+# Telegram rechaza mensajes de mas de 4096 caracteres (HTTP 400). Se deja
+# margen por debajo para no rozar el limite exacto.
+TELEGRAM_MAX_CHARS = 3900
+
+
+def _partir_mensaje(mensaje: str, limite: int = TELEGRAM_MAX_CHARS) -> list[str]:
+    """Parte un mensaje largo en trozos de como mucho `limite` caracteres,
+    cortando siempre entre parrafos (bloques separados por linea en blanco)
+    para no dejar un pick a medias entre dos mensajes."""
+    trozos, actual = [], ""
+    for parrafo in mensaje.split("\n\n"):
+        candidato = f"{actual}\n\n{parrafo}" if actual else parrafo
+        if len(candidato) <= limite:
+            actual = candidato
+            continue
+        if actual:
+            trozos.append(actual)
+        actual = parrafo[:limite]  # un parrafo suelto nunca deberia pasar del limite
+    if actual:
+        trozos.append(actual)
+    return trozos
+
+
 def notificar_telegram(mensaje: str):
     """Manda un mensaje a todos los chats configurados en NOTIFY_CHAT_IDS.
     Si falta el token o no hay chats configurados, no hace nada (no es un
-    error -- la notificacion es opcional)."""
+    error -- la notificacion es opcional).
+
+    Si el mensaje supera el limite de Telegram se manda en varios trozos
+    (antes se rechazaba entero y el fallo solo quedaba en el log, sin que
+    llegara ningun aviso). Si Telegram rechaza el formato Markdown (ej. un
+    nombre de equipo con guion bajo o asterisco), se reintenta en texto
+    plano para que el aviso llegue igualmente."""
     if not TELEGRAM_TOKEN or not NOTIFY_CHAT_IDS:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     for chat_id in NOTIFY_CHAT_IDS:
-        try:
-            r = requests.post(url, json={"chat_id": chat_id, "text": mensaje, "parse_mode": "Markdown"}, timeout=15)
-            if r.status_code != 200:
-                print(f"[AVISO] No se pudo notificar a {chat_id}: {r.text}")
-        except Exception as e:
-            print(f"[AVISO] Error notificando a Telegram: {e}")
+        for trozo in _partir_mensaje(mensaje):
+            try:
+                r = requests.post(url, json={"chat_id": chat_id, "text": trozo, "parse_mode": "Markdown"}, timeout=15)
+                if r.status_code == 400 and "parse entities" in r.text:
+                    r = requests.post(url, json={"chat_id": chat_id, "text": trozo}, timeout=15)
+                if r.status_code != 200:
+                    print(f"[AVISO] No se pudo notificar a {chat_id}: {r.text}")
+            except Exception as e:
+                print(f"[AVISO] Error notificando a Telegram: {e}")
 
 
 # Liga sin datos reales de corners/tarjetas (Urvalsdeild, Islandia) --
@@ -551,7 +583,7 @@ def guardar_picks_detectados(conn, encontrados: list[dict]):
     hasta que verificar_picks_pendientes() los resuelva mas adelante."""
     crear_tabla_value_picks(conn)
     cur = conn.cursor()
-    nuevos = 0
+    nuevos = []
     for p in encontrados:
         if _ya_registrado(conn, p["fixture_id"], p["condicion"]):
             continue
@@ -563,7 +595,7 @@ def guardar_picks_detectados(conn, encontrados: list[dict]):
         """, (p["fixture_id"], p["condicion"], p["partido"], p["mercado"],
               p["nuestra_prob"], p["consenso"], p["edge"], p["mejor_cuota"],
               p["ev"], p["pasa_pp"], p["pasa_ev"]))
-        nuevos += 1
+        nuevos.append(p)
     conn.commit()
     return nuevos
 
@@ -722,21 +754,24 @@ def modo_en_vivo(conn):
         return
 
     nuevos = guardar_picks_detectados(conn, encontrados)
-    if nuevos == 0:
+    if not nuevos:
         print(f"Los {len(encontrados)} picks detectados ya estaban guardados de una ejecucion anterior (mismo partido, sin jugarse todavia). Nada nuevo que notificar.")
         return
 
-    encontrados.sort(key=lambda x: x["edge"], reverse=True)
-    print(f"{'='*70}\n{nuevos} PICKS DE VALOR NUEVOS (de {len(encontrados)} detectados; guardados para verificar mas tarde)\n{'='*70}")
-    for p in encontrados:
+    # Solo se lista lo NUEVO: antes se listaban tambien los ya avisados en
+    # rondas anteriores que seguian cumpliendo, y el mensaje crecia hasta
+    # superar el limite de Telegram (4096) y dejaba de llegar.
+    nuevos.sort(key=lambda x: x["edge"], reverse=True)
+    print(f"{'='*70}\n{len(nuevos)} PICKS DE VALOR NUEVOS (de {len(encontrados)} detectados; guardados para verificar mas tarde)\n{'='*70}")
+    for p in nuevos:
         metodo = "puntos+EV" if p["pasa_pp"] and p["pasa_ev"] else ("puntos" if p["pasa_pp"] else "EV")
         print(f"\n{p['partido']}")
         print(f"  Mercado: {p['mercado']}  |  Metodo: {metodo}")
         print(f"  Nuestra probabilidad: {p['nuestra_prob']}%  |  Consenso mercado: {p['consenso']}%")
         print(f"  Ventaja: +{p['edge']} puntos  |  EV: {p['ev']:+.0%}  |  Mejor cuota disponible: {p['mejor_cuota']}")
 
-    lineas_msg = [f"🎯 *{nuevos} pick(s) de valor nuevo(s)*\n"]
-    for p in encontrados:
+    lineas_msg = [f"🎯 *{len(nuevos)} pick(s) de valor nuevo(s)*\n"]
+    for p in nuevos:
         metodo = "puntos+EV" if p["pasa_pp"] and p["pasa_ev"] else ("puntos" if p["pasa_pp"] else "EV")
         lineas_msg.append(
             f"*{p['partido']}*\n"
