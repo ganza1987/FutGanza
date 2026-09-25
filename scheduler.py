@@ -1,9 +1,17 @@
 """
-Scheduler: sends automatic daily analysis ONLY for the leagues that have
-match data ingested in Supabase (las 10 ligas de build_database.py).
-- Ligas con datos: 06:00 AM Spain time (revision 1)
-- Ligas con datos: 12:30 PM Spain time (revision 2, repaso de mediodia)
-Also supports manual fixtures via fixtures.json.
+Analisis diario de "Ligas con datos" (las 10 ligas de build_database.py).
+
+YA NO HAY BUCLE AQUI (2026-09-25): antes start_scheduler() era un while True
+que comprobaba la hora cada 60 s y obligaba a Render a mantener la app
+despierta 24/7 -- el cupo gratuito de Render son 750 h/mes POR CUENTA
+(compartidas entre BaloncestoGanza, FutGanza y HandGanza) y se agoto a
+media semana. Ahora estas funciones las llama run_analisis.py desde GitHub
+Actions (analisis_manana.yml y analisis_mediodia.yml):
+- 06:00 Madrid ("manana"): la jornada completa (30 h vista) + deteccion de valor.
+- 12:30 Madrid ("mediodia"): SOLO actualiza cuotas + deteccion de valor (manda
+  unicamente los picks nuevos, deduplicados); no repite el listado.
+El bucle tambien disparaba avisos desde fixtures.json, un archivo con 3
+partidos de octubre-noviembre de 2025 (feature muerta): eliminado.
 """
 
 import os
@@ -280,7 +288,7 @@ async def verify_pending_picks():
                 f"({len(resultados_por_fixture)} partidos con resultado final disponible)")
 
 
-async def send_daily_analysis(leagues: dict, region_name: str, region_emoji: str):
+async def send_daily_analysis(leagues: dict, region_name: str, region_emoji: str, solo_cuotas: bool = False):
     """Punto de entrada publico: evita que dos analisis se ejecuten en paralelo
     (ej. un /picks manual mientras ya esta corriendo el analisis programado, o
     un reintento duplicado de Telegram). Si ya hay uno en curso, avisa y sale."""
@@ -294,13 +302,20 @@ async def send_daily_analysis(leagues: dict, region_name: str, region_emoji: str
         return
     _analysis_running = True
     try:
-        await _send_daily_analysis_impl(leagues, region_name, region_emoji)
+        await _send_daily_analysis_impl(leagues, region_name, region_emoji, solo_cuotas=solo_cuotas)
     finally:
         _analysis_running = False
 
 
-async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoji: str):
-    """Generic daily analysis sender for any set of leagues."""
+async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoji: str, solo_cuotas: bool = False):
+    """Generic daily analysis sender for any set of leagues.
+
+    solo_cuotas=True (repaso de mediodia): hace TODO lo que prepara el terreno
+    -- verifica picks pendientes, guarda los partidos pendientes y captura sus
+    cuotas -- pero NO manda el listado de partidos ni genera el analisis de
+    cada uno (que es lo que gasta llamadas a Claude y repetia casi el mismo
+    mensaje de la manana). Asi la jornada se ve UNA vez al dia y el repaso solo
+    aporta cuotas nuevas, de las que luego sale la deteccion de valor."""
     chat_ids = get_notify_chat_ids()
     if not chat_ids:
         logger.warning("No NOTIFY_CHAT_IDS configured.")
@@ -352,6 +367,13 @@ async def _send_daily_analysis_impl(leagues: dict, region_name: str, region_emoj
                 guardar_partido_pendiente(fixture_id, league_id, kickoff_dt, home, away)
             await fetch_and_store_odds(fixture_id, league_id)
         await asyncio.sleep(0.5)
+
+    if solo_cuotas:
+        logger.info(
+            f"{region_name}: {len(all_fixtures)} partidos con cuotas actualizadas "
+            f"(modo solo_cuotas: no se envia listado ni analisis)."
+        )
+        return
 
     if not all_fixtures:
         logger.info(f"No {region_name} fixtures today.")
@@ -451,7 +473,10 @@ async def send_daily_ligas_con_datos_analysis():
 
 
 async def send_daily_ligas_con_datos_analysis_mediodia():
-    await send_daily_analysis(LIGAS_CON_DATOS, "Ligas con datos (repaso mediodía)", "📊")
+    """Repaso de mediodia: solo actualiza cuotas y detecta valor (que manda,
+    ella sola y deduplicada, los picks NUEVOS). No repite el listado de la
+    jornada: ver solo_cuotas en _send_daily_analysis_impl."""
+    await send_daily_analysis(LIGAS_CON_DATOS, "Ligas con datos (repaso mediodía)", "📊", solo_cuotas=True)
     await _ejecutar_deteccion_de_valor()
 
 
@@ -484,71 +509,3 @@ async def _ejecutar_deteccion_de_valor():
         await asyncio.to_thread(_run)
     except Exception as e:
         logger.error(f"Error ejecutando deteccion de valor tras el analisis: {e}")
-
-
-async def start_scheduler():
-    """Main scheduler loop."""
-    logger.info("Scheduler started.")
-    already_sent: set[str] = set()
-
-    while True:
-        try:
-            now_utc = datetime.now(timezone.utc)
-            today_key = now_utc.strftime("%Y-%m-%d")
-
-            # ── Daily "Ligas con datos" analysis at 06:00 Spain ───────────────
-            datos_key = f"datos_{today_key}"
-            if now_utc.hour == to_utc_hour(LIGAS_CON_DATOS_SEND_HOUR) and now_utc.minute < 10:
-                if datos_key not in already_sent:
-                    logger.info(f"Triggering daily 'Ligas con datos' analysis for {today_key}")
-                    already_sent.add(datos_key)
-                    await send_daily_ligas_con_datos_analysis()
-
-            # ── Daily "Ligas con datos" 2nd check at 12:30 Spain ──────────────
-            datos_key_2 = f"datos2_{today_key}"
-            utc_hour_2 = to_utc_hour(LIGAS_CON_DATOS_SEND_HOUR_2)
-            if (now_utc.hour == utc_hour_2
-                    and LIGAS_CON_DATOS_SEND_MINUTE_2 <= now_utc.minute < LIGAS_CON_DATOS_SEND_MINUTE_2 + 10):
-                if datos_key_2 not in already_sent:
-                    logger.info(f"Triggering midday 'Ligas con datos' check for {today_key}")
-                    already_sent.add(datos_key_2)
-                    await send_daily_ligas_con_datos_analysis_mediodia()
-
-            # ── Manual fixtures from fixtures.json ────────────────────────────
-            import json
-            from pathlib import Path
-            fixtures_file = Path("fixtures.json")
-            if fixtures_file.exists():
-                try:
-                    fixtures = json.loads(fixtures_file.read_text())
-                    window_end = now_utc + timedelta(hours=ALERT_HOURS)
-                    chat_ids = get_notify_chat_ids()
-
-                    for fix in fixtures:
-                        key = f"fix_{fix['home']}|{fix['away']}|{fix['kickoff']}"
-                        if key in already_sent:
-                            continue
-                        try:
-                            kickoff = datetime.fromisoformat(fix["kickoff"].replace("Z", "+00:00"))
-                        except ValueError:
-                            continue
-                        if now_utc <= kickoff <= window_end:
-                            already_sent.add(key)
-                            home, away = fix["home"], fix["away"]
-                            report = await analyze_match(home, away)
-                            header = (
-                                f"🔔 *ANÁLISIS PRE-PARTIDO*\n"
-                                f"⏰ Comienza en menos de {ALERT_HOURS}h\n\n"
-                            )
-                            full = header + report
-                            for chat_id in chat_ids:
-                                for chunk in split_message(full):
-                                    await send_message(chat_id, chunk)
-                                    await asyncio.sleep(0.3)
-                except Exception as e:
-                    logger.error(f"Fixtures error: {e}")
-
-        except Exception as e:
-            logger.error(f"Scheduler error: {e}")
-
-        await asyncio.sleep(60)

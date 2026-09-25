@@ -5,7 +5,6 @@ from fastapi import FastAPI, Request
 from contextlib import asynccontextmanager
 import httpx
 from bot_handler import handle_update
-from scheduler import start_scheduler
 from dashboard import router as dashboard_router
 from database import init_db
 
@@ -33,7 +32,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"DB init failed: {e}")
     await set_webhook()
-    asyncio.create_task(start_scheduler())
+    # Sin scheduler interno: el analisis diario corre en GitHub Actions
+    # (ver scheduler.py y run_analisis.py), para que Render pueda dormir la app.
     yield
 
 

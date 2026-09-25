@@ -68,21 +68,14 @@ En el panel de Railway → tu proyecto → **Variables**, añade:
 
 ---
 
-## Añadir partidos para análisis automático
+## Análisis automático diario
 
-Edita `fixtures.json` con los partidos que quieras monitorizar:
+Ya no hay `fixtures.json` ni bucle dentro de la app (se eliminó el 2026-09-25: mantenía Render despierto 24/7 y agotó las 750 h/mes gratis compartidas entre las 3 apps). El análisis lo lanzan dos workflows de GitHub Actions (`run_analisis.py`):
 
-```json
-[
-  {
-    "home": "Real Madrid",
-    "away": "Barcelona",
-    "kickoff": "2025-10-26T19:00:00Z"
-  }
-]
-```
+- **06:00 Madrid** (`analisis_manana.yml`): jornada completa de las próximas 30 h + detección de valor.
+- **12:30 Madrid** (`analisis_mediodia.yml`): solo actualiza cuotas y detecta valor (envía únicamente los picks nuevos, sin repetir la lista).
 
-El bot comprobará cada hora si algún partido empieza en las próximas `ALERT_HOURS` horas y enviará el análisis automáticamente.
+Secretos necesarios en GitHub: `DATABASE_URL`, `API_FOOTBALL_KEY`, `TELEGRAM_TOKEN`, `NOTIFY_CHAT_IDS` y, para el análisis de la mañana, `ANTHROPIC_API_KEY` y `HIGHLIGHTLY_KEY`.
 
 ---
 
@@ -120,8 +113,8 @@ football-bot/
 ├── main.py           # FastAPI app + webhook
 ├── bot_handler.py    # Procesamiento de mensajes Telegram
 ├── analyzer.py       # Llamada a Claude API + condiciones
-├── scheduler.py      # Análisis automáticos pre-partido
-├── fixtures.json     # Partidos programados
+├── scheduler.py      # Funciones del análisis diario (las llama run_analisis.py)
+├── run_analisis.py   # Punto de entrada para GitHub Actions
 ├── requirements.txt  # Dependencias Python
 ├── Procfile          # Comando de inicio (Railway/Render)
 ├── railway.toml      # Configuración Railway

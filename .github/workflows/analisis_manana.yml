@@ -1,0 +1,46 @@
+name: Analisis de la manana FutGanza
+
+# Jornada completa (proximas 30 h) + deteccion de valor, a las 06:00 hora de
+# Madrid -- ver run_analisis.py. Sustituye al cron interno de scheduler.py
+# (que mantenia Render despierto 24/7 y agoto el cupo de 750 h/mes).
+#
+# GitHub Actions solo entiende UTC: 04:00 UTC = 06:00 Madrid en verano (CEST),
+# 05:00 UTC = 06:00 en invierno (CET). Se lanzan las dos y el script solo
+# actua la que coincide con las 6 en Madrid. GitHub puede retrasar el cron unos
+# minutos en horas de mucha carga.
+on:
+  schedule:
+    - cron: '0 4 * * *'
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: analisis-futganza
+  cancel-in-progress: false
+
+jobs:
+  analisis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Analisis de la manana
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APIFOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          NOTIFY_CHAT_IDS: ${{ secrets.NOTIFY_CHAT_IDS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          HIGHLIGHTLY_KEY: ${{ secrets.HIGHLIGHTLY_KEY }}
+          # En una ejecucion manual se hace siempre, sin esperar a las 6:00.
+          FORZAR_ANALISIS: ${{ github.event_name == 'workflow_dispatch' }}
+        run: python run_analisis.py manana

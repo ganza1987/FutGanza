@@ -1,0 +1,45 @@
+name: Repaso de mediodia FutGanza
+
+# Solo actualiza cuotas y detecta valor (manda unicamente los picks NUEVOS); no
+# repite el listado de la jornada, que ya llego a las 06:00 -- ver
+# run_analisis.py. Corre a las 12:30 hora de Madrid. El 79 % de los picks de
+# valor de FutGanza salen de este pase (a mediodia ya hay mas cuotas
+# publicadas de los partidos de la tarde), por eso se mantiene.
+#
+# GitHub Actions solo entiende UTC: 10:30 UTC = 12:30 Madrid en verano (CEST),
+# 11:30 UTC = 12:30 en invierno (CET). Se lanzan las dos y el script solo actua
+# la que cae en la hora 12 de Madrid.
+on:
+  schedule:
+    - cron: '30 10 * * *'
+    - cron: '30 11 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: analisis-futganza
+  cancel-in-progress: false
+
+jobs:
+  repaso:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Repaso de mediodia (cuotas + valor)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APIFOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          NOTIFY_CHAT_IDS: ${{ secrets.NOTIFY_CHAT_IDS }}
+          # En una ejecucion manual se hace siempre, sin esperar a las 12:30.
+          FORZAR_ANALISIS: ${{ github.event_name == 'workflow_dispatch' }}
+        run: python run_analisis.py mediodia
