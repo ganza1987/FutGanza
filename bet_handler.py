@@ -128,7 +128,9 @@ async def handle_bet_command(chat_id, text: str, send_fn) -> bool:
 
     # /stats
     if text.lower().startswith("/stats"):
-        s = get_stats(str(chat_id))
+        # sport="football": la tabla `bets` la comparte HandGanza (sport="handball");
+        # sin este filtro las estadisticas de futbol contaban tambien sus apuestas.
+        s = get_stats(str(chat_id), sport="football")
         total = s["won"] + s["lost"]
         profit_sign = "+" if s["total_profit"] >= 0 else ""
         roi_sign = "+" if s["roi"] >= 0 else ""
@@ -151,7 +153,8 @@ async def handle_bet_command(chat_id, text: str, send_fn) -> bool:
     if text.lower().startswith("/apuestas"):
         only_pending = "pendiente" in text.lower()
         bets = get_bets(str(chat_id), limit=10,
-                        result_filter="pending" if only_pending else None)
+                        result_filter="pending" if only_pending else None,
+                        sport="football")  # ver /stats: la tabla la comparte HandGanza
         if not bets:
             await send_fn(chat_id, "No tienes apuestas registradas aún.")
             return True

@@ -11,7 +11,7 @@ router = APIRouter()
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    bets = get_all_bets_web()
+    bets = get_all_bets_web(sport="football")  # la tabla `bets` la comparte HandGanza
 
     won = sum(1 for b in bets if b["result"] == "won")
     lost = sum(1 for b in bets if b["result"] == "lost")
