@@ -4,14 +4,16 @@ name: Analisis de la manana FutGanza
 # Madrid -- ver run_analisis.py. Sustituye al cron interno de scheduler.py
 # (que mantenia Render despierto 24/7 y agoto el cupo de 750 h/mes).
 #
-# GitHub Actions solo entiende UTC: 04:00 UTC = 06:00 Madrid en verano (CEST),
-# 05:00 UTC = 06:00 en invierno (CET). Se lanzan las dos y el script solo
-# actua la que coincide con las 6 en Madrid. GitHub puede retrasar el cron unos
-# minutos en horas de mucha carga.
+# GitHub retrasa MUCHO los cron programados (en BaloncestoGanza llegaban ~5-6 h
+# tarde), asi que: minutos "raros" (:17/:47), varios intentos, y run_analisis.py
+# acepta cualquier hora entre las 6 y las 12 en Madrid y reserva "hoy ya se hizo"
+# en la base de datos (el primero en llegar trabaja, sin duplicar).
 on:
   schedule:
-    - cron: '0 4 * * *'
-    - cron: '0 5 * * *'
+    - cron: '17 4 * * *'
+    - cron: '47 4 * * *'
+    - cron: '17 5 * * *'
+    - cron: '47 5 * * *'
   workflow_dispatch:
 
 concurrency:

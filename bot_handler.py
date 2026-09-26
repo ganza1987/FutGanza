@@ -19,12 +19,27 @@ VS_PATTERN = re.compile(
 )
 
 
-async def send_message(chat_id, text: str, parse_mode: str = "Markdown"):
+# Contador de envios rechazados por Telegram durante este proceso. run_analisis.py
+# lo mira al terminar: antes un fallo solo se anotaba y la ejecucion programada de
+# GitHub Actions salia en VERDE sin haber enviado nada.
+envios_fallidos = 0
+
+
+async def send_message(chat_id, text: str, parse_mode: str = "Markdown") -> bool:
+    global envios_fallidos
     async with httpx.AsyncClient(timeout=30) as client:
         payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
         r = await client.post(f"{TELEGRAM_API}/sendMessage", json=payload)
+        if r.status_code == 400 and parse_mode and "parse entities" in r.text:
+            # Un nombre con "_" o "*" rompe el Markdown: se reenvia en texto plano
+            # en vez de perder el mensaje.
+            logger.warning("Telegram no pudo interpretar el Markdown; se reenvia en texto plano.")
+            r = await client.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
         if r.status_code != 200:
             logger.error(f"Telegram sendMessage error: {r.text}")
+            envios_fallidos += 1
+            return False
+        return True
 
 
 async def send_typing(chat_id):

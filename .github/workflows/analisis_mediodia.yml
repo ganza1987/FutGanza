@@ -6,13 +6,15 @@ name: Repaso de mediodia FutGanza
 # valor de FutGanza salen de este pase (a mediodia ya hay mas cuotas
 # publicadas de los partidos de la tarde), por eso se mantiene.
 #
-# GitHub Actions solo entiende UTC: 10:30 UTC = 12:30 Madrid en verano (CEST),
-# 11:30 UTC = 12:30 en invierno (CET). Se lanzan las dos y el script solo actua
-# la que cae en la hora 12 de Madrid.
+# Igual que analisis_manana.yml: minutos "raros" (:17/:47), varios intentos, y
+# run_analisis.py acepta cualquier hora entre las 12 y las 20 en Madrid con
+# reserva diaria en la base de datos (sin duplicar).
 on:
   schedule:
-    - cron: '30 10 * * *'
-    - cron: '30 11 * * *'
+    - cron: '17 10 * * *'
+    - cron: '47 10 * * *'
+    - cron: '17 11 * * *'
+    - cron: '47 11 * * *'
   workflow_dispatch:
 
 concurrency:
