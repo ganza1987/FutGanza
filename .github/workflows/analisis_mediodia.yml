@@ -16,6 +16,11 @@ on:
     - cron: '17 11 * * *'
     - cron: '47 11 * * *'
   workflow_dispatch:
+    inputs:
+      forzar:
+        description: 'Forzar: enviar ya, saltandose la ventana horaria y la reserva diaria (boton manual). El temporizador externo (cron-job.org) manda false: respeta ventana y evita duplicados.'
+        type: boolean
+        default: true
 
 concurrency:
   group: analisis-futganza
@@ -43,5 +48,5 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           NOTIFY_CHAT_IDS: ${{ secrets.NOTIFY_CHAT_IDS }}
           # En una ejecucion manual se hace siempre, sin esperar a las 12:30.
-          FORZAR_ANALISIS: ${{ github.event_name == 'workflow_dispatch' }}
+          FORZAR_ANALISIS: ${{ github.event_name == 'workflow_dispatch' && inputs.forzar }}
         run: python run_analisis.py mediodia

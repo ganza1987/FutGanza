@@ -15,6 +15,11 @@ on:
     - cron: '17 5 * * *'
     - cron: '47 5 * * *'
   workflow_dispatch:
+    inputs:
+      forzar:
+        description: 'Forzar: enviar ya, saltandose la ventana horaria y la reserva diaria (boton manual). El temporizador externo (cron-job.org) manda false: respeta ventana y evita duplicados.'
+        type: boolean
+        default: true
 
 concurrency:
   group: analisis-futganza
@@ -44,5 +49,5 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           HIGHLIGHTLY_KEY: ${{ secrets.HIGHLIGHTLY_KEY }}
           # En una ejecucion manual se hace siempre, sin esperar a las 6:00.
-          FORZAR_ANALISIS: ${{ github.event_name == 'workflow_dispatch' }}
+          FORZAR_ANALISIS: ${{ github.event_name == 'workflow_dispatch' && inputs.forzar }}
         run: python run_analisis.py manana
