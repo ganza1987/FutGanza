@@ -12,7 +12,7 @@ Envio a prueba de retrasos (2026-09-26): GitHub Actions solo entiende UTC y
 retrasa los cron programados HORAS (medido en BaloncestoGanza: llegaban ~5-6 h
 tarde). La version anterior exigia que en Madrid fuera EXACTAMENTE la hora
 objetivo y, si el cron llegaba tarde, no hacia nada y salia en verde. Ahora cada
-modo acepta una VENTANA ancha (manana: 6-12h; mediodia: 12-20h en Madrid) y
+modo acepta una VENTANA ancha (manana: 6-21h; mediodia: 12-22h en Madrid) y
 reserva "hoy ya se hizo" en la base de datos (tabla avisos_enviados): el primero
 en llegar trabaja y los demas ven que ya esta, sin duplicar. Los workflows usan
 minutos "raros" (:17/:47), mucho menos saturados que :00, y varios intentos.
@@ -39,8 +39,13 @@ logger = logging.getLogger(__name__)
 
 # modo -> (hora de Madrid en que empieza la ventana, en que acaba, funcion a llamar)
 MODOS = {
-    "manana": (6, 12, scheduler.send_daily_ligas_con_datos_analysis),
-    "mediodia": (12, 20, scheduler.send_daily_ligas_con_datos_analysis_mediodia),
+    # Ventanas AMPLIADAS el 2026-10-05: el cron de GitHub llega 4-7 h tarde (medido:
+    # los disparos de las 06:17-07:47 Madrid llegaban entre las 11:53 y las 13:17), asi
+    # que con "manana" en 6-12 solo 1 dia de 8 se enviaba (el resto "Fuera de ventana").
+    # Llegue cuando llegue el primer intento del dia, se envia; la reserva en
+    # avisos_enviados evita duplicados.
+    "manana": (6, 21, scheduler.send_daily_ligas_con_datos_analysis),
+    "mediodia": (12, 22, scheduler.send_daily_ligas_con_datos_analysis_mediodia),
 }
 
 
