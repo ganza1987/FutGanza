@@ -138,14 +138,25 @@ def obtener_partidos_finalizados(league_id, season):
     return data.get("response", [])
 
 
-def obtener_estadisticas_partido(fixture_id):
-    """Devuelve las estadisticas (corners, tarjetas, tiros) de un partido."""
+def obtener_estadisticas_partido(fixture_id, intentos=3):
+    """
+    Devuelve las estadisticas (corners, tarjetas, tiros) de un partido, o None
+    si la API sigue fallando tras `intentos` intentos. Antes un solo error 500 de
+    la API en UN partido (visto el 10, 16 y 18 de octubre de 2026) tiraba toda la
+    ingesta y dejaba sin guardar el resto de partidos y ligas.
+    """
     url = f"{API_BASE_URL}/fixtures/statistics"
     params = {"fixture": fixture_id}
-    resp = requests.get(url, headers=cabeceras_api(), params=params, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("response", [])
+    for intento in range(1, intentos + 1):
+        try:
+            resp = requests.get(url, headers=cabeceras_api(), params=params, timeout=30)
+            resp.raise_for_status()
+            return resp.json().get("response", [])
+        except requests.exceptions.RequestException as e:
+            print(f"    (intento {intento}/{intentos} fallido para el partido {fixture_id}: {e})")
+            if intento < intentos:
+                time.sleep(2 * intento)
+    return None
 
 
 def extraer_valor_stat(stats_equipo, nombre_stat):
@@ -252,13 +263,20 @@ def main():
     crear_tablas_si_no_existen(conn)
 
     total_guardados = 0
+    saltados = 0
+    ligas_fallidas = []
 
     for liga in LIGAS:
         print(f"\n--- Procesando {liga['nombre']} ({liga['pais']}) ---")
         liga_id = guardar_liga_si_no_existe(conn, liga)
 
         print("Pidiendo partidos finalizados a API-Football...")
-        partidos = obtener_partidos_finalizados(liga["api_league_id"], TEMPORADA)
+        try:
+            partidos = obtener_partidos_finalizados(liga["api_league_id"], TEMPORADA)
+        except requests.exceptions.RequestException as e:
+            print(f"::warning::{liga['nombre']}: no se pudieron pedir los partidos ({e}); se salta la liga.")
+            ligas_fallidas.append(liga["nombre"])
+            continue
         print(f"Encontrados {len(partidos)} partidos finalizados.")
 
         for i, fixture in enumerate(partidos, start=1):
@@ -268,6 +286,11 @@ def main():
             print(f"  [{i}/{len(partidos)}] {local} vs {visitante} (fixture {fixture_id})")
 
             stats = obtener_estadisticas_partido(fixture_id)
+            if stats is None:
+                # No se guarda nada de este partido (ni con estadisticas a 0): la
+                # proxima ingesta lo reintenta, y si ya estaba guardado no se pisa.
+                saltados += 1
+                continue
             guardar_partido(conn, liga_id, fixture, stats)
             total_guardados += 1
 
@@ -275,6 +298,12 @@ def main():
 
     conn.close()
     print(f"\nListo. Se guardaron/actualizaron {total_guardados} partidos en total.")
+    if saltados or ligas_fallidas:
+        print(
+            f"::warning::Ingesta incompleta: {saltados} partido(s) saltados por errores de la API"
+            + (f" y ligas sin procesar: {', '.join(ligas_fallidas)}" if ligas_fallidas else "")
+            + ". Se reintentan en la siguiente ejecucion."
+        )
 
 
 if __name__ == "__main__":
