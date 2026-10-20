@@ -1047,6 +1047,15 @@ def enviar_resumen_semanal_telegram(conn):
     if solo_ev:
         lineas.append(linea_stats("Lo que EV añade ademas de PUNTOS", solo_ev))
     lineas.append("")
+    # Explicacion en lenguaje llano (pedida por el usuario el 2026-10-20: no se entendia que es "puntos").
+    lineas.append(
+        "_Que es cada metodo: PUNTOS apuesta solo cuando creemos que algo es 15 puntos mas probable de lo que "
+        "cree el mercado (el mas exigente). EV apuesta cuando la ganancia media esperada, con la mejor cuota, "
+        "supera el 10% (el mas amplio)."
+        + (" Todo lo de PUNTOS esta tambien dentro de EV." if not solo_pp else "")
+        + " ROI +10% = por cada euro apostado se recuperan 1,10 euros de media._"
+    )
+    lineas.append("")
 
     if c["con_metodo"] < MUESTRA_MINIMA_RECOMENDACION:
         lineas.append(
