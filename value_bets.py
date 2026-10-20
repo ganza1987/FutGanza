@@ -924,9 +924,16 @@ def _stats_grupo(lista: list) -> dict | None:
         return None
     n = len(lista)
     aciertos = sum(1 for x in lista if x["resultado"] == "hit")
-    beneficio = sum((float(x["mejor_cuota"]) - 1) if x["resultado"] == "hit" else -1 for x in lista)
+    retornos = [(float(x["mejor_cuota"]) - 1) if x["resultado"] == "hit" else -1.0 for x in lista]
+    beneficio = sum(retornos)
+    media = beneficio / n
+    # Error estandar del ROI (en puntos): con cuotas altas (~3) una apuesta suelta rinde
+    # +2 o -1, asi que el ROI de pocas decenas de apuestas es muy ruidoso. Se enseña en el
+    # resumen semanal para no leer +10% como si fuera una señal.
+    se_roi = 100 * (math.sqrt(sum((r - media) ** 2 for r in retornos) / (n - 1)) / math.sqrt(n)) if n > 1 else None
+    partidos = len({x.get("fixture_id") for x in lista if x.get("fixture_id") is not None})
     return {"n": n, "aciertos": aciertos, "pct": 100 * aciertos / n,
-            "beneficio": beneficio, "roi": 100 * beneficio / n}
+            "beneficio": beneficio, "roi": 100 * media, "se_roi": se_roi, "partidos": partidos}
 
 
 def _calcular_comparacion(conn) -> dict:
@@ -1027,11 +1034,18 @@ def enviar_resumen_semanal_telegram(conn):
     def linea_stats(nombre, s):
         if not s:
             return f"*{nombre}*: sin datos todavia"
-        return f"*{nombre}*: {s['n']} apuestas, {s['pct']:.0f}% aciertos, ROI {s['roi']:+.1f}%"
+        margen = f" (±{1.96 * s['se_roi']:.0f} pts de margen)" if s.get("se_roi") is not None else ""
+        partidos = f" en {s['partidos']} partidos" if s.get("partidos") else ""
+        return f"*{nombre}*: {s['n']} apuestas{partidos}, {s['pct']:.0f}% aciertos, ROI {s['roi']:+.1f}%{margen}"
 
-    lineas.append(linea_stats("Metodo PUNTOS (edge>15pp)", c["total_pp"]))
+    # Los dos metodos NO son independientes: lo que cumple PUNTOS casi siempre cumple tambien
+    # EV (el de puntos es el mas exigente). Por eso se enseñan tres grupos que no se solapan
+    # y se compara "lo mejor" (cumple los dos, o solo puntos) contra "lo que EV añade".
+    solo_pp, solo_ev, ambos = c["solo_pp"], c["solo_ev"], c["ambos"]
+    lineas.append(linea_stats("Metodo PUNTOS (ventaja>15pp)", c["total_pp"]))
     lineas.append(linea_stats("Metodo EV (EV>10%)", c["total_ev"]))
-    lineas.append(linea_stats("Coinciden ambos", c["ambos"]))
+    if solo_ev:
+        lineas.append(linea_stats("Lo que EV añade ademas de PUNTOS", solo_ev))
     lineas.append("")
 
     if c["con_metodo"] < MUESTRA_MINIMA_RECOMENDACION:
@@ -1041,20 +1055,30 @@ def enviar_resumen_semanal_telegram(conn):
             "conclusiones -- toca seguir esperando."
         )
     else:
-        roi_pp = c["total_pp"]["roi"] if c["total_pp"] else None
-        roi_ev = c["total_ev"]["roi"] if c["total_ev"] else None
-        if roi_pp is None or roi_ev is None:
-            lineas.append("Uno de los dos metodos todavia no tiene apuestas resueltas propias -- toca seguir esperando.")
+        a, b = c["total_pp"], solo_ev  # grupos disjuntos
+        if not a or not b or a.get("se_roi") is None or b.get("se_roi") is None:
+            lineas.append("Falta algun grupo con apuestas resueltas para poder compararlos -- toca seguir esperando.")
         else:
-            diferencia = roi_pp - roi_ev
-            if abs(diferencia) < DIFERENCIA_ROI_NOTABLE:
-                lineas.append(f"Van parecidos (diferencia de {abs(diferencia):.1f} puntos de ROI). Seguimos observando.")
+            diferencia = a["roi"] - b["roi"]
+            error = math.sqrt(a["se_roi"] ** 2 + b["se_roi"] ** 2)
+            margen = 1.96 * error
+            lineas.append(
+                f"Comparacion limpia (PUNTOS frente a lo que solo añade EV): diferencia de ROI {diferencia:+.1f} pts, "
+                f"margen de error ±{margen:.0f} pts."
+            )
+            if abs(diferencia) <= margen or min(a["n"], b["n"]) < MUESTRA_MINIMA_RECOMENDACION:
+                lineas.append(
+                    "👉 Todavia NO se puede decir que uno vaya mejor: la diferencia cabe dentro del margen de error "
+                    "(es ruido con esta muestra). Con cuotas de ~3, hacen falta cientos de apuestas mas."
+                )
             elif diferencia > 0:
-                lineas.append(f"👉 De momento PUNTOS va mejor que EV (+{diferencia:.1f} puntos de ROI de diferencia), "
-                               "pero con esta muestra podria cambiar -- no lo tomes como definitivo todavia.")
+                lineas.append("👉 PUNTOS va mejor que lo que añade EV, y la diferencia ya supera el margen de error.")
             else:
-                lineas.append(f"👉 De momento EV va mejor que PUNTOS (+{abs(diferencia):.1f} puntos de ROI de diferencia), "
-                               "pero con esta muestra podria cambiar -- no lo tomes como definitivo todavia.")
+                lineas.append("👉 Lo que añade EV va mejor que PUNTOS, y la diferencia ya supera el margen de error.")
+        lineas.append(
+            "_Aviso: el ROI se calcula con la MEJOR cuota entre casas; con la de tu casa sera algo menor. "
+            "Varias apuestas son del mismo partido, asi que no son del todo independientes._"
+        )
 
     mensaje = "\n".join(lineas)
     print(mensaje)
